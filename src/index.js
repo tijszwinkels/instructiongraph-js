@@ -11,3 +11,6 @@ export {
   verifyItemSignature,
 } from './crypto.js'
 export { buildItem, isEnvelope, isoNow, makeRef, parseRef, tombstone } from './object.js'
+export { createHubStore } from './store/hub.js'
+export { createFsStore } from './store/fs.js'
+export { createSyncStore } from './store/sync.js'
