@@ -7,6 +7,7 @@
 import { sign as cryptoSign } from './crypto.js'
 import { buildItem, tombstone, makeRef, isoNow } from './object.js'
 import { deriveKeypair, importPEM, createSigner, IDENTITY_UUID, ROOT_REF, IDENTITY_TYPE_DEF } from './identity.js'
+import { validateSchema } from './validation.js'
 
 /**
  * Resolve an identity config to { pubkey, privateKey }.
@@ -49,6 +50,7 @@ export function createClient(opts = {}) {
   // No hardcoded default realm — buildItem defaults to pubkey (private).
   // Pass defaultRealm or in: ['dataverse001'] explicitly for public objects.
   const defaultRealm = opts.defaultRealm || null
+  const typeCache = new Map()
 
   let identity = null // { pubkey, privateKey } or null
   let signer = null // { pubkey, sign } or null
@@ -122,11 +124,39 @@ export function createClient(opts = {}) {
       return { ...result, ref: signedObj.item.ref }
     },
 
-    // ─── Create (build + sign + publish) ───────────
+    // ─── TYPE validation ───────────────────────────
+
+    /**
+     * Validate item content against its TYPE schema (if type_def relation exists).
+     * Fetches the TYPE object from the store and caches it.
+     * Skips silently if no type_def, no schema, or store unavailable.
+     * @param {object} item
+     */
+    async validateType(item) {
+      const typeRef = item.relations?.type_def?.[0]?.ref
+      if (!typeRef || !store?.get) return
+
+      let typeObj = typeCache.get(typeRef)
+      if (typeObj === undefined) {
+        typeObj = await store.get(typeRef).catch(() => null)
+        typeCache.set(typeRef, typeObj ?? null)
+      }
+
+      const schema = typeObj?.item?.content?.schema
+      if (!schema) return
+
+      const errors = validateSchema(item.content ?? {}, schema)
+      if (errors.length > 0) {
+        throw new Error(`TYPE validation failed: ${errors.join('; ')}`)
+      }
+    },
+
+    // ─── Create (build + validate + sign + publish) ─
 
     async create(fields) {
       requireIdentity()
       const item = client.build(fields)
+      await client.validateType(item)
       const signed = await client.sign(item)
       const result = await client.publish(signed)
       if (!result.ok) throw new Error(`Publish failed: ${result.error || `status ${result.status}`}`)
@@ -163,6 +193,7 @@ export function createClient(opts = {}) {
       updated.updated_at = isoNow()
       updated.revision = (orig.revision || 0) + 1
 
+      await client.validateType(updated)
       const signed = await client.sign(updated)
       const result = await client.publish(signed)
       if (!result.ok) throw new Error(`Publish failed: ${result.error || `status ${result.status}`}`)

@@ -65,6 +65,59 @@ describe('client', () => {
     })
   })
 
+  describe('TYPE validation', () => {
+    it('rejects content that violates TYPE schema', async () => {
+      // Mock store with a TYPE object containing a schema
+      const typeRef = 'pk.type-id'
+      const typeObj = {
+        is: 'instructionGraph001', signature: 'sig',
+        item: {
+          id: 'type-id', pubkey: 'pk', ref: typeRef,
+          type: 'TYPE',
+          content: {
+            schema: {
+              type: 'object',
+              required: ['title'],
+              properties: { title: { type: 'string' }, body: { type: 'string' } }
+            }
+          }
+        }
+      }
+
+      const objects = new Map([[typeRef, typeObj]])
+      const mockStore = {
+        async get(ref) { return objects.get(ref) || null },
+        async put(obj) { objects.set(obj.item.ref, obj); return { ok: true } },
+        async search() { return { items: [], cursor: null } },
+        async inbound() { return { items: [], cursor: null } }
+      }
+
+      const ig = createClient({
+        store: mockStore,
+        identity: { type: 'credentials', username: 'type-test', password: 'type-test-pw' }
+      })
+      await ig.ready
+
+      // Should reject: missing required 'title'
+      await assert.rejects(
+        () => ig.create({
+          type: 'POST',
+          relations: { type_def: [{ ref: typeRef }] },
+          content: { body: 'no title' }
+        }),
+        /title.*required/
+      )
+
+      // Should pass: has required 'title'
+      const ref = await ig.create({
+        type: 'POST',
+        relations: { type_def: [{ ref: typeRef }] },
+        content: { title: 'Hello' }
+      })
+      assert.ok(ref)
+    })
+  })
+
   describe('with PEM identity', () => {
     it('loads PEM and signs', async () => {
       const { readFileSync, existsSync } = await import('node:fs')
