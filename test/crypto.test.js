@@ -1,11 +1,6 @@
 import { describe, it } from 'node:test'
 import assert from 'node:assert/strict'
-import { execSync } from 'node:child_process'
-import { writeFileSync, unlinkSync } from 'node:fs'
-import { tmpdir } from 'node:os'
-import { join } from 'node:path'
 import { sign, verify, generateKeypair, exportCompressedPubkey, p1363ToDer } from '../src/crypto.js'
-import { canonicalJSON } from '../src/canonical.js'
 
 describe('crypto', () => {
   it('generateKeypair returns pubkey (44 chars base64url) and privateKey', async () => {
@@ -69,44 +64,5 @@ describe('crypto', () => {
     assert.equal(der[2], 0x02, 'first INTEGER tag')
   })
 
-  it('cross-validates with shell verify script', async () => {
-    const verifyScript = '/home/claude/projects/dataverse/.instructionGraph/verify'
-
-    const kp = await generateKeypair()
-    const item = {
-      id: 'cross-test-001',
-      pubkey: kp.pubkey,
-      ref: kp.pubkey + '.cross-test-001',
-      created_at: '2026-03-30T10:00:00Z',
-      type: 'TEST',
-      in: ['dataverse001'],
-      content: { hello: 'cross-validation' }
-    }
-    const signature = await sign(kp.privateKey, item)
-    const envelope = {
-      is: 'instructionGraph001',
-      signature,
-      item
-    }
-
-    const tmpPath = join(tmpdir(), `ig-cross-test-${Date.now()}.json`)
-    writeFileSync(tmpPath, canonicalJSON(envelope))
-
-    try {
-      const result = execSync(`"${verifyScript}" "${tmpPath}"`, { encoding: 'utf-8' }).trim()
-      assert.ok(result.includes('Verified OK'), `Shell verify should pass, got: ${result}`)
-    } finally {
-      unlinkSync(tmpPath)
-    }
-  })
-
-  it('verifies objects signed by shell scripts', async () => {
-    // Find an existing signed object to test against
-    const dataDir = '/home/claude/projects/dataverse/.instructionGraph/data'
-    const testFile = execSync(`ls ${dataDir}/*.json | head -1`, { encoding: 'utf-8' }).trim()
-    const obj = JSON.parse(execSync(`cat "${testFile}"`, { encoding: 'utf-8' }))
-
-    const valid = await verify(obj.item.pubkey, obj.signature, obj.item)
-    assert.ok(valid, `JS verify should pass for shell-signed object: ${testFile}`)
-  })
+  // Cross-validation tests are in cross-validate.test.js
 })

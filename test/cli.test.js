@@ -1,0 +1,152 @@
+/**
+ * CLI integration tests.
+ * Spins up a mock hub server, configures a temp .instructionGraph dir,
+ * and exercises all ig CLI commands.
+ */
+import { describe, it, before, after } from 'node:test'
+import assert from 'node:assert/strict'
+import http from 'node:http'
+import { execFile as execFileCb } from 'node:child_process'
+import { promisify } from 'node:util'
+import { generateKeyPairSync } from 'node:crypto'
+import { mkdtemp, mkdir, writeFile, readFile } from 'node:fs/promises'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
+import { verify } from '../src/crypto.js'
+
+const execFile = promisify(execFileCb)
+const CLI = join(import.meta.dirname, '..', 'cli', 'ig.js')
+
+async function readBody(req) {
+  const chunks = []
+  for await (const chunk of req) chunks.push(chunk)
+  return Buffer.concat(chunks).toString('utf-8')
+}
+
+describe('CLI', () => {
+  let hub, projectDir, stored
+
+  before(async () => {
+    stored = new Map()
+
+    // Mock hub server
+    const server = http.createServer(async (req, res) => {
+      const url = new URL(req.url, 'http://127.0.0.1')
+      const body = await readBody(req)
+
+      if (req.method === 'GET' && url.pathname === '/auth/challenge') {
+        res.writeHead(200, { 'Content-Type': 'application/json' })
+        return res.end(JSON.stringify({ challenge: 'cli-challenge', expires_at: '2026-04-01T00:00:00Z' }))
+      }
+      if (req.method === 'POST' && url.pathname === '/auth/token') {
+        res.writeHead(200, { 'Content-Type': 'application/json' })
+        return res.end(JSON.stringify({ token: 'cli-token', expires_at: '2026-04-02T00:00:00Z' }))
+      }
+      if (req.method === 'GET' && url.pathname === '/search') {
+        res.writeHead(200, { 'Content-Type': 'application/json' })
+        return res.end(JSON.stringify({ items: [...stored.values()], cursor: null }))
+      }
+      if (req.method === 'GET' && stored.has(url.pathname.slice(1))) {
+        res.writeHead(200, { 'Content-Type': 'application/json' })
+        return res.end(JSON.stringify(stored.get(url.pathname.slice(1))))
+      }
+      if (req.method === 'PUT') {
+        const obj = JSON.parse(body)
+        stored.set(url.pathname.slice(1), obj)
+        res.writeHead(201, { 'Content-Type': 'application/json' })
+        return res.end(JSON.stringify(obj))
+      }
+      res.writeHead(404, { 'Content-Type': 'application/json' })
+      res.end(JSON.stringify({ error: 'not found' }))
+    })
+
+    await new Promise((resolve, reject) => {
+      server.listen(0, '127.0.0.1', () => resolve())
+      server.on('error', reject)
+    })
+    const { port } = server.address()
+    hub = {
+      url: `http://127.0.0.1:${port}`,
+      server,
+      async close() { await new Promise(r => server.close(r)) }
+    }
+
+    // Set up project dir with .instructionGraph config + identity
+    projectDir = await mkdtemp(join(tmpdir(), 'ig-cli-test-'))
+    const igDir = join(projectDir, '.instructionGraph')
+    await mkdir(join(igDir, 'config'), { recursive: true })
+    await mkdir(join(igDir, 'identities', 'default'), { recursive: true })
+    await writeFile(join(igDir, 'config', 'hub-url'), hub.url)
+    await writeFile(join(igDir, 'config', 'active-identity'), 'default')
+
+    const pem = generateKeyPairSync('ec', { namedCurve: 'prime256v1' })
+      .privateKey.export({ format: 'pem', type: 'pkcs8' }).toString()
+    await writeFile(join(igDir, 'identities', 'default', 'private.pem'), pem)
+  })
+
+  after(async () => { await hub.close() })
+
+  function ig(...args) {
+    return execFile('node', [CLI, ...args], { cwd: projectDir })
+  }
+
+  it('ig verify: accepts valid signature, rejects tampered', async () => {
+    // Create a signed object via ig sign
+    const specPath = join(projectDir, 'test-spec.json')
+    await writeFile(specPath, JSON.stringify({ type: 'NOTE', content: { text: 'verify-test' } }))
+
+    const { stdout: signedJson } = await ig('sign', specPath)
+    const signed = JSON.parse(signedJson)
+    const validPath = join(projectDir, 'valid.json')
+    await writeFile(validPath, JSON.stringify(signed))
+
+    const { stdout } = await ig('verify', validPath)
+    assert.match(stdout, /Verified OK/)
+
+    // Tamper and verify it fails
+    signed.item.content.text = 'tampered'
+    const tamperedPath = join(projectDir, 'tampered.json')
+    await writeFile(tamperedPath, JSON.stringify(signed))
+
+    await assert.rejects(
+      ig('verify', tamperedPath),
+      err => err.code === 1
+    )
+  })
+
+  it('ig create: signs and publishes to hub', async () => {
+    const specPath = join(projectDir, 'create-spec.json')
+    await writeFile(specPath, JSON.stringify({ type: 'POST', content: { title: 'CLI Post' } }))
+
+    const { stdout } = await ig('create', specPath)
+    const ref = stdout.trim()
+    assert.ok(ref.includes('.'), 'should return a ref')
+    assert.ok(stored.has(ref), 'should be stored on hub')
+
+    const obj = stored.get(ref)
+    assert.equal(obj.item.type, 'POST')
+    assert.equal(obj.item.content.title, 'CLI Post')
+
+    const valid = await verify(obj.item.pubkey, obj.signature, obj.item)
+    assert.ok(valid, 'published object should have valid signature')
+  })
+
+  it('ig get: fetches from hub', async () => {
+    // Use the object created above
+    const ref = [...stored.keys()][0]
+    const { stdout } = await ig('get', ref)
+    const obj = JSON.parse(stdout)
+    assert.equal(obj.item.ref, ref)
+  })
+
+  it('ig search: lists objects', async () => {
+    const { stdout } = await ig('search', '--type', 'POST')
+    // search output is one-line-per-result format
+    assert.ok(stdout.includes('POST'))
+  })
+
+  it('ig identity: shows current pubkey', async () => {
+    const { stdout } = await ig('identity')
+    assert.match(stdout, /Pubkey:/)
+  })
+})
