@@ -232,7 +232,7 @@ describe('CLI', () => {
       )
     })
 
-    it('generates identity with --local flag in cwd', async () => {
+    it('generates identity with --project flag in cwd', async () => {
       const localDir = await mkdtemp(join(tmpdir(), 'ig-local-test-'))
       function igLocal(...a) {
         const env = { ...process.env }
@@ -240,7 +240,7 @@ describe('CLI', () => {
         return execFile('node', [CLI, ...a], { cwd: localDir, env })
       }
 
-      const { stdout } = await igLocal('identity', 'generate', '--name', 'local-id', '--local')
+      const { stdout } = await igLocal('identity', 'generate', '--name', 'local-id', '--project')
       assert.match(stdout, /Initialized InstructionGraph/)
       assert.match(stdout, /Generated identity: local-id/)
 
@@ -288,6 +288,81 @@ describe('CLI', () => {
       assert.match(stdout, /^\s*default$/m)
       assert.match(stdout, /^\s*list-a$/m)
       assert.match(stdout, /^\* list-b$/m)
+    })
+  })
+
+  describe('status line', () => {
+    it('shows online status on stderr when server is configured', async () => {
+      const specPath = join(projectDir, 'status-spec.json')
+      await writeFile(specPath, JSON.stringify({ type: 'NOTE', content: { text: 'status' } }))
+      const { stderr } = await ig('create', specPath)
+      assert.match(stderr, new RegExp(hub.url.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')))
+    })
+
+    it('shows offline status on stderr when no server', async () => {
+      // Temporarily remove hub-url
+      const hubUrlPath = join(projectDir, '.instructionGraph', 'config', 'hub-url')
+      const savedUrl = await readFile(hubUrlPath, 'utf-8')
+
+      // Need a data dir for offline mode
+      await mkdir(join(projectDir, '.instructionGraph', 'data'), { recursive: true })
+      await rm(hubUrlPath)
+
+      const specPath = join(projectDir, 'offline-spec.json')
+      await writeFile(specPath, JSON.stringify({ type: 'NOTE', content: { text: 'offline' } }))
+      const { stderr } = await ig('create', specPath)
+      assert.match(stderr, /offline/)
+
+      // Restore
+      await writeFile(hubUrlPath, savedUrl)
+    })
+  })
+
+  describe('ig server', () => {
+    it('shows offline status when no server configured', async () => {
+      await rm(join(projectDir, '.instructionGraph', 'config', 'hub-url'), { force: true })
+      const { stdout } = await ig('server')
+      assert.match(stdout, /No server configured/)
+      assert.match(stdout, /offline/i)
+    })
+
+    it('sets and shows server', async () => {
+      const { stdout: setOut } = await ig('server', 'set', hub.url)
+      assert.match(setOut, /Connected to/)
+
+      const configUrl = await readFile(
+        join(projectDir, '.instructionGraph', 'config', 'hub-url'), 'utf-8'
+      )
+      assert.equal(configUrl.trim(), hub.url)
+
+      const { stdout } = await ig('server')
+      assert.match(stdout, new RegExp(`Server: ${hub.url.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}`))
+    })
+
+    it('removes server', async () => {
+      await ig('server', 'set', hub.url)
+      const { stdout } = await ig('server', 'remove')
+      assert.match(stdout, /Server removed/)
+      assert.match(stdout, /offline/i)
+
+      const { stdout: status } = await ig('server')
+      assert.match(status, /No server configured/)
+    })
+
+    it('rejects invalid URLs', async () => {
+      await assert.rejects(
+        ig('server', 'set', 'not-a-url'),
+        err => err.stderr.includes('Invalid URL')
+      )
+    })
+
+    it('remove is idempotent', async () => {
+      await rm(join(projectDir, '.instructionGraph', 'config', 'hub-url'), { force: true })
+      const { stdout } = await ig('server', 'remove')
+      assert.match(stdout, /already offline/)
+
+      // Restore hub-url for downstream tests
+      await writeFile(join(projectDir, '.instructionGraph', 'config', 'hub-url'), hub.url)
     })
   })
 

@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 
 /**
- * ig — CLI for InstructionGraph hubs.
+ * ig — CLI for InstructionGraph.
  *
  * Usage:
  *   ig get <ref>              Fetch and print object
@@ -12,9 +12,10 @@
  *   ig create <spec.json>     Sign and publish
  *   ig auth                   Authenticate with hub
  *   ig identity               Show current identity
+ *   ig server                 Show/set/remove hub server
  */
 
-import { readFileSync, writeFileSync, existsSync, mkdirSync, readdirSync } from 'node:fs'
+import { readFileSync, writeFileSync, existsSync, mkdirSync, readdirSync, unlinkSync } from 'node:fs'
 import { resolve, join } from 'node:path'
 import { canonicalJSON } from '../src/canonical.js'
 import { verify } from '../src/crypto.js'
@@ -67,10 +68,13 @@ Commands:
   ig auth                          Hub authentication
   ig identity                      Show current identity
   ig identity generate [--name N]  Generate a new identity
-                       [--local]    Use ./.instructionGraph instead of ~/
+                       [--project]  Use ./.instructionGraph instead of ~/
                        [--activate] Set as active identity
   ig identity activate <name>      Activate an existing identity
   ig identity list                 List available identities
+  ig server                        Show current server
+  ig server set <url>              Connect to a hub server
+  ig server remove                 Disconnect (go offline)
   ig realm                         Show current default realm
   ig realm set <realm>             Set default realm
 
@@ -87,7 +91,8 @@ function commandUsage(command) {
     sign: `Usage: ig sign <spec.json>\n\nBuild and sign a spec, then print the canonical envelope JSON.`,
     create: `Usage: ig create <spec.json>\n\nBuild, sign, and publish a spec to the configured store.`,
     auth: `Usage: ig auth\n\nAuthenticate with the configured hub.`,
-    identity: `Usage: ig identity [generate|activate|list] [options]\n\nShow or manage the active identity.\n\nSubcommands:\n  ig identity generate [--name N] [--local] [--activate]\n  ig identity activate <name>\n  ig identity list\n\nEnvironment:\n  INSTRUCTIONGRAPH_DIR  Override config directory location`,
+    identity: `Usage: ig identity [generate|activate|list] [options]\n\nShow or manage the active identity.\n\nSubcommands:\n  ig identity generate [--name N] [--project] [--activate]\n  ig identity activate <name>\n  ig identity list\n\nEnvironment:\n  INSTRUCTIONGRAPH_DIR  Override config directory location`,
+    server: `Usage: ig server [set <url> | remove]\n\nShow, configure, or remove the hub server connection.\n\nSubcommands:\n  ig server              Show current server status\n  ig server set <url>    Connect to a hub server for sync\n  ig server remove       Disconnect and go offline\n\nWithout a server, all data stays on local filesystem only.\nWith a server, objects sync between local storage and the hub.`,
     realm: `Usage: ig realm [set <realm>]\n\nShow or set the default realm used for new objects.`
   }
 
@@ -194,31 +199,48 @@ function listIdentityNames(configDir) {
 
 async function makeClient() {
   const configDir = findConfigDir()
-  const hubUrl = readConfig(configDir, 'hub-url', 'https://dataverse001.net')
+  const hubUrl = readConfig(configDir, 'hub-url', null)  // null = no server configured
   const defaultRealm = readConfig(configDir, 'default-realm', null)  // null → pubkey realm (private by default)
+  const dataDir = join(configDir, 'data')
+  const hasLocal = existsSync(dataDir)
 
-  const hub = createHubStore({ url: hubUrl })
-  let store = hub
+  let store
+  let isOnline = false
 
-  // If we have a local data dir, use sync store
-  if (configDir && existsSync(join(configDir, 'data'))) {
-    const local = createFsStore({ dataDir: join(configDir, 'data') })
+  if (hubUrl && hasLocal) {
+    // Both: sync store (local primary, hub sync)
+    const local = createFsStore({ dataDir })
+    const hub = createHubStore({ url: hubUrl })
     store = createSyncStore({ local, remote: hub })
+    isOnline = true
+  } else if (hubUrl) {
+    // Hub only (no local data dir yet)
+    store = createHubStore({ url: hubUrl })
+    isOnline = true
+  } else if (hasLocal) {
+    // Local only (offline mode)
+    store = createFsStore({ dataDir })
+  } else {
+    // Nothing configured
+    die(
+      'No InstructionGraph configured.\n' +
+      'Run \'ig identity generate\' to get started.'
+    )
   }
 
   const identity = resolveIdentityConfig(configDir)
 
   const client = createClient({ store, identity, defaultRealm })
   if (identity) await client.ready
-  return { client, hub, configDir }
+  return { client, configDir, isOnline, hubUrl }
 }
 
 // ─── Identity generation ─────────────────────────────────────────
 
 async function identityGenerate() {
-  // Determine target directory: --local → ./.instructionGraph, else default
+  // Determine target directory: --project → ./.instructionGraph, else default
   let configDir
-  if (args.includes('--local')) {
+  if (args.includes('--project')) {
     configDir = join(process.cwd(), '.instructionGraph')
   } else if (process.env.INSTRUCTIONGRAPH_DIR) {
     configDir = process.env.INSTRUCTIONGRAPH_DIR
@@ -273,6 +295,15 @@ async function identityGenerate() {
       console.log('Set as active identity')
     }
   }
+
+  // Nudge: if no server configured, explain offline mode
+  const hubUrl = readConfig(configDir, 'hub-url', null)
+  if (!hubUrl) {
+    console.log('')
+    console.log('You are currently offline — objects stay on local filesystem only.')
+    console.log('To sync with a hub server:')
+    console.log('  ig server set https://dataverse001.net')
+  }
 }
 
 function identityActivate() {
@@ -304,17 +335,21 @@ function identityList() {
 }
 
 async function showRealm() {
-  const { client } = await makeClient()
-  await client.ready
-  const configuredRealm = readConfig(findConfigDir(), 'default-realm', null)
+  const configDir = findConfigDir()
+  const configuredRealm = readConfig(configDir, 'default-realm', null)
 
   if (configuredRealm) {
     console.log(`Current realm: ${configuredRealm}`)
     return
   }
 
-  if (client.pubkey) {
-    console.log(`Current realm: ${client.pubkey} (pubkey realm default)`)
+  // No explicit realm — check if we have an identity (pubkey realm default)
+  const identityConfig = resolveIdentityConfig(configDir)
+  if (identityConfig) {
+    const { importPEM } = await import('../src/identity.js')
+    const pem = readFileSync(identityConfig.path, 'utf-8')
+    const kp = await importPEM(pem)
+    console.log(`Current realm: ${kp.pubkey} (pubkey realm default)`)
   } else {
     console.log('Current realm: <no identity configured>')
   }
@@ -323,12 +358,76 @@ async function showRealm() {
 function setRealm() {
   const realm = args[2]
   if (!realm) die('Usage: ig realm set <realm>')
-  const configDir = findConfigDir() || join(process.cwd(), '.instructionGraph')
+  const configDir = findConfigDir()
   writeConfig(configDir, 'default-realm', realm)
   console.log(`Set default realm: ${realm}`)
 }
 
+// ─── Server management ───────────────────────────────────────────
+
+function showServer() {
+  const configDir = findConfigDir()
+  const hubUrl = readConfig(configDir, 'hub-url', null)
+
+  if (hubUrl) {
+    console.log(`Server: ${hubUrl}`)
+    console.log('Objects sync between local filesystem and the hub.')
+  } else {
+    console.log('No server configured (offline mode).')
+    console.log('Objects are stored on local filesystem only.')
+    console.log('')
+    console.log('To connect to a hub server:')
+    console.log('  ig server set https://dataverse001.net')
+    console.log('')
+    console.log('What does connecting do?')
+    console.log('  \u2022 Your public objects become discoverable by others')
+    console.log('  \u2022 You can discover and fetch objects created by others')
+    console.log('  \u2022 Local copies are kept \u2014 you keep working if the server goes down')
+    console.log('  \u2022 Private objects (in your pubkey realm) stay private on the hub too')
+  }
+}
+
+function setServer() {
+  const url = args[2]
+  if (!url) die('Usage: ig server set <url>')
+
+  try { new URL(url) } catch { die(`Invalid URL: ${url}`) }
+
+  const configDir = findConfigDir()
+  writeConfig(configDir, 'hub-url', url)
+  console.log(`Connected to ${url}`)
+  console.log('Objects will now sync between local filesystem and the hub.')
+}
+
+function removeServer() {
+  const configDir = findConfigDir()
+  const configPath = join(configDir, 'config', 'hub-url')
+
+  if (!existsSync(configPath)) {
+    console.log('No server configured (already offline).')
+    return
+  }
+
+  unlinkSync(configPath)
+  console.log('Server removed. Now in offline mode.')
+  console.log('Your local objects are still on disk \u2014 nothing was deleted.')
+}
+
+// ─── Status ──────────────────────────────────────────────────────
+
+/** Print online/offline status to stderr (doesn't interfere with JSON on stdout). */
+function printStatus({ isOnline, hubUrl }) {
+  if (isOnline) {
+    process.stderr.write(`\x1b[32m\u25cf\x1b[0m ${hubUrl}\n`)
+  } else {
+    process.stderr.write(`\x1b[33m\u25cb\x1b[0m offline \x1b[2m(ig server set <url> to connect)\x1b[0m\n`)
+  }
+}
+
 // ─── Commands ────────────────────────────────────────────────────
+
+/** Commands that skip makeClient and status line. */
+const QUIET_COMMANDS = new Set(['identity', 'server', 'verify'])
 
 async function main() {
   if (!cmd || cmd === '--help' || cmd === '-h') usage()
@@ -338,16 +437,18 @@ async function main() {
     case 'get': {
       const ref = args[1]
       if (!ref) die('Usage: ig get <ref>')
-      const { client } = await makeClient()
-      const obj = await client.get(ref)
+      const ctx = await makeClient()
+      printStatus(ctx)
+      const obj = await ctx.client.get(ref)
       if (!obj) die(`Not found: ${ref}`)
       console.log(JSON.stringify(obj, null, 2))
       break
     }
 
     case 'search': {
-      const { client } = await makeClient()
-      const result = await client.search({
+      const ctx = await makeClient()
+      printStatus(ctx)
+      const result = await ctx.client.search({
         type: flag('type'),
         by: flag('by'),
         limit: flag('limit') ? parseInt(flag('limit')) : 20
@@ -363,8 +464,9 @@ async function main() {
     case 'inbound': {
       const ref = args[1]
       if (!ref) die('Usage: ig inbound <ref>')
-      const { client } = await makeClient()
-      const result = await client.inbound(ref, {
+      const ctx = await makeClient()
+      printStatus(ctx)
+      const result = await ctx.client.inbound(ref, {
         relation: flag('relation'),
         type: flag('type'),
         limit: flag('limit') ? parseInt(flag('limit')) : 20
@@ -395,10 +497,11 @@ async function main() {
     case 'sign': {
       const file = args[1]
       if (!file) die('Usage: ig sign <spec.json>')
-      const { client } = await makeClient()
+      const ctx = await makeClient()
+      printStatus(ctx)
       const spec = JSON.parse(readFileSync(resolve(file), 'utf-8'))
-      const item = isEnvelope(spec) ? spec.item : client.build(spec)
-      const envelope = await client.sign(item)
+      const item = isEnvelope(spec) ? spec.item : ctx.client.build(spec)
+      const envelope = await ctx.client.sign(item)
       console.log(canonicalJSON(envelope))
       break
     }
@@ -406,16 +509,19 @@ async function main() {
     case 'create': {
       const file = args[1]
       if (!file) die('Usage: ig create <spec.json>')
-      const { client } = await makeClient()
+      const ctx = await makeClient()
+      printStatus(ctx)
       const spec = JSON.parse(readFileSync(resolve(file), 'utf-8'))
-      const ref = await client.create(spec)
+      const ref = await ctx.client.create(spec)
       console.log(ref)
       break
     }
 
     case 'auth': {
-      const { client } = await makeClient()
-      const result = await client.authenticate()
+      const ctx = await makeClient()
+      if (!ctx.isOnline) die('No server configured. Run \'ig server set <url>\' first.')
+      printStatus(ctx)
+      const result = await ctx.client.authenticate()
       if (result.ok) {
         console.log(`Authenticated as ${result.pubkey}`)
         console.log(`Token: ${result.token}`)
@@ -436,14 +542,30 @@ async function main() {
       } else {
         const configDir = findConfigDir()
         const identityConfig = resolveIdentityConfig(configDir)
-        const { client } = await makeClient()
-        await client.ready
-        if (client.pubkey) {
-          if (identityConfig?.name) console.log(`Identity: ${identityConfig.name}`)
-          console.log(`Pubkey: ${client.pubkey}`)
+        if (identityConfig) {
+          const { importPEM } = await import('../src/identity.js')
+          const pem = readFileSync(identityConfig.path, 'utf-8')
+          const kp = await importPEM(pem)
+          console.log(`Identity: ${identityConfig.name}`)
+          console.log(`Pubkey: ${kp.pubkey}`)
         } else {
           console.log('No identity configured')
+          console.log('Run \'ig identity generate\' to create one.')
         }
+      }
+      break
+    }
+
+    case 'server': {
+      const subcmd = args[1]
+      if (!subcmd) {
+        showServer()
+      } else if (subcmd === 'set') {
+        setServer()
+      } else if (subcmd === 'remove') {
+        removeServer()
+      } else {
+        die('Usage: ig server [set <url> | remove]')
       }
       break
     }
