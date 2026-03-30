@@ -9,7 +9,7 @@ import http from 'node:http'
 import { execFile as execFileCb } from 'node:child_process'
 import { promisify } from 'node:util'
 import { generateKeyPairSync } from 'node:crypto'
-import { mkdtemp, mkdir, writeFile, readFile } from 'node:fs/promises'
+import { mkdtemp, mkdir, writeFile, readFile, access, readdir } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { verify } from '../src/crypto.js'
@@ -148,5 +148,54 @@ describe('CLI', () => {
   it('ig identity: shows current pubkey', async () => {
     const { stdout } = await ig('identity')
     assert.match(stdout, /Pubkey:/)
+  })
+
+  describe('ig identity generate', () => {
+    it('generates a new identity with default name', async () => {
+      const { stdout } = await ig('identity', 'generate', '--name', 'test-new')
+      assert.match(stdout, /Generated identity: test-new/)
+      assert.match(stdout, /Pubkey:/)
+      assert.match(stdout, /PEM saved/)
+    })
+
+    it('generates identity with custom name and usable PEM', async () => {
+      const { stdout } = await ig('identity', 'generate', '--name', 'work')
+      assert.match(stdout, /Generated identity: work/)
+      // PEM file should exist
+      const pemPath = join(projectDir, '.instructionGraph', 'identities', 'work', 'private.pem')
+      await access(pemPath) // throws if not found
+      const pem = await readFile(pemPath, 'utf-8')
+      assert.match(pem, /-----BEGIN PRIVATE KEY-----/)
+
+      // Verify the PEM is usable: switch to it and sign something
+      await writeFile(join(projectDir, '.instructionGraph', 'config', 'active-identity'), 'work')
+      const specPath = join(projectDir, 'pem-test-spec.json')
+      await writeFile(specPath, JSON.stringify({ type: 'NOTE', content: { text: 'signed with generated key' } }))
+      const { stdout: signedJson } = await ig('sign', specPath)
+      const signed = JSON.parse(signedJson)
+      const valid = await verify(signed.item.pubkey, signed.signature, signed.item)
+      assert.ok(valid, 'generated PEM should produce valid signatures')
+
+      // Restore original identity
+      await writeFile(join(projectDir, '.instructionGraph', 'config', 'active-identity'), 'default')
+    })
+
+    it('sets new identity as active with --activate', async () => {
+      const { stdout } = await ig('identity', 'generate', '--name', 'activated', '--activate')
+      assert.match(stdout, /Set as active identity/)
+      // Check config file
+      const activeIdentity = await readFile(
+        join(projectDir, '.instructionGraph', 'config', 'active-identity'), 'utf-8'
+      )
+      assert.equal(activeIdentity.trim(), 'activated')
+    })
+
+    it('refuses to overwrite existing identity', async () => {
+      // 'work' was created above
+      await assert.rejects(
+        ig('identity', 'generate', '--name', 'work'),
+        err => err.stderr.includes('already exists')
+      )
+    })
   })
 })

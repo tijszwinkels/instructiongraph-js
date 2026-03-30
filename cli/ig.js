@@ -14,7 +14,7 @@
  *   ig identity               Show current identity
  */
 
-import { readFileSync, existsSync } from 'node:fs'
+import { readFileSync, writeFileSync, existsSync, mkdirSync } from 'node:fs'
 import { resolve, join } from 'node:path'
 import { canonicalJSON } from '../src/canonical.js'
 import { verify } from '../src/crypto.js'
@@ -23,6 +23,7 @@ import { createClient } from '../src/client.js'
 import { createHubStore } from '../src/store/hub.js'
 import { createFsStore } from '../src/store/fs.js'
 import { createSyncStore } from '../src/store/sync.js'
+import { generateKeypair } from '../src/crypto.js'
 
 const args = process.argv.slice(2)
 const cmd = args[0]
@@ -49,7 +50,9 @@ Commands:
   ig sign <spec.json>              Sign spec, print envelope
   ig create <spec.json>            Sign and publish
   ig auth                          Hub authentication
-  ig identity                      Show current identity`)
+  ig identity                      Show current identity
+  ig identity generate [--name N]  Generate a new identity
+                       [--activate] Set as active identity`)
   process.exit(0)
 }
 
@@ -114,6 +117,47 @@ async function makeClient() {
   const client = createClient({ store, identity, defaultRealm })
   if (identity) await client.ready
   return { client, hub, configDir }
+}
+
+// ─── Identity generation ─────────────────────────────────────────
+
+async function identityGenerate() {
+  const configDir = findConfigDir() || join(process.cwd(), '.instructionGraph')
+  const name = flag('name') || 'default'
+
+  const identityDir = join(configDir, 'identities', name)
+  const pemPath = join(identityDir, 'private.pem')
+
+  if (existsSync(pemPath)) {
+    die(`Identity "${name}" already exists at ${pemPath}`)
+  }
+
+  // Generate extractable keypair so we can export to PEM
+  const kp = await generateKeypair({ extractable: true })
+
+  // Export private key as PKCS#8 PEM
+  const pkcs8 = new Uint8Array(
+    await globalThis.crypto.subtle.exportKey('pkcs8', kp.privateKey)
+  )
+  let b = ''
+  for (let i = 0; i < pkcs8.length; i++) b += String.fromCharCode(pkcs8[i])
+  const b64 = btoa(b).match(/.{1,64}/g).join('\n')
+  const pem = `-----BEGIN PRIVATE KEY-----\n${b64}\n-----END PRIVATE KEY-----\n`
+
+  mkdirSync(identityDir, { recursive: true })
+  writeFileSync(pemPath, pem, { mode: 0o600 })
+
+  console.log(`Generated identity: ${name}`)
+  console.log(`Pubkey: ${kp.pubkey}`)
+  console.log(`PEM saved: ${pemPath}`)
+
+  // Optionally set as active identity
+  if (args.includes('--activate')) {
+    const configPath = join(configDir, 'config')
+    mkdirSync(configPath, { recursive: true })
+    writeFileSync(join(configPath, 'active-identity'), name)
+    console.log('Set as active identity')
+  }
 }
 
 // ─── Commands ────────────────────────────────────────────────────
@@ -213,12 +257,17 @@ async function main() {
     }
 
     case 'identity': {
-      const { client } = await makeClient()
-      await client.ready
-      if (client.pubkey) {
-        console.log(`Pubkey: ${client.pubkey}`)
+      const subcmd = args[1]
+      if (subcmd === 'generate') {
+        await identityGenerate()
       } else {
-        console.log('No identity configured')
+        const { client } = await makeClient()
+        await client.ready
+        if (client.pubkey) {
+          console.log(`Pubkey: ${client.pubkey}`)
+        } else {
+          console.log('No identity configured')
+        }
       }
       break
     }
