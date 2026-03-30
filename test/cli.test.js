@@ -436,6 +436,19 @@ describe('CLI', () => {
       assert.match(stdout, /visible to everyone/)
     })
 
+    it('ig realm set identity sets realm to current identity pubkey', async () => {
+      const { stdout: idOut } = await ig('identity')
+      const pubkey = idOut.match(/Pubkey: (\S+)/)[1]
+
+      const { stdout } = await ig('realm', 'set', 'identity')
+      assert.match(stdout, /identity realm.*private/i)
+
+      const realm = await readFile(
+        join(projectDir, '.instructionGraph', 'config', 'default-realm'), 'utf-8'
+      )
+      assert.equal(realm.trim(), pubkey)
+    })
+
     it('uses configured default realm when signing new objects', async () => {
       await ig('realm', 'set', 'dataverse001')
       const specPath = join(projectDir, 'realm-test-spec.json')

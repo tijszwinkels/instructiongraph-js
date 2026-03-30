@@ -75,8 +75,10 @@ Commands:
   ig server                        Show current server
   ig server set <url>              Connect to a hub server
   ig server remove                 Disconnect (go offline)
-  ig realm                         Show current default realm
-  ig realm set <realm>             Set default realm
+  ig realm                              Show current default realm
+  ig realm set identity                 Go private (identity realm)
+  ig realm set dataverse001             Go public
+  ig realm set <realm>                  Set a specific realm
 
 Run 'ig <command> --help' for command-specific help.`)
   process.exit(0)
@@ -93,7 +95,7 @@ function commandUsage(command) {
     auth: `Usage: ig auth\n\nAuthenticate with the configured hub.`,
     identity: `Usage: ig identity [generate|activate|list] [options]\n\nShow or manage the active identity.\n\nSubcommands:\n  ig identity generate [--name N] [--project] [--activate]\n  ig identity activate <name>\n  ig identity list\n\nEnvironment:\n  INSTRUCTIONGRAPH_DIR  Override config directory location`,
     server: `Usage: ig server [set <url> | remove]\n\nShow, configure, or remove the hub server connection.\n\nSubcommands:\n  ig server              Show current server status\n  ig server set <url>    Connect to a hub server for sync\n  ig server remove       Disconnect and go offline\n\nWithout a server, all data stays on local filesystem only.\nWith a server, objects sync between local storage and the hub.`,
-    realm: `Usage: ig realm [set <realm>]\n\nShow or set the default realm used for new objects.`
+    realm: `Usage: ig realm [set <realm|identity|dataverse001>]\n\nShow or set the default realm used for new objects.\n\n  ig realm set identity       Use current identity\'s realm (private)\n  ig realm set dataverse001   Use the public dataverse realm\n  ig realm set <pubkey>       Use any specific realm`
   }
 
   if (!docs[command]) die(`Unknown command: ${command}\nRun 'ig --help' for usage.`)
@@ -381,21 +383,31 @@ async function showRealm() {
   console.log('')
   console.log('To switch:')
   console.log('  ig realm set dataverse001        Go public')
-  console.log('  ig realm set <pubkey>            Go private')
+  console.log('  ig realm set identity            Go private (use current identity realm)')
 }
 
-function setRealm() {
-  const realm = args[2]
-  if (!realm) die('Usage: ig realm set <realm>')
+async function setRealm() {
+  let realm = args[2]
+  if (!realm) die('Usage: ig realm set <realm|identity|dataverse001>')
+
   const configDir = findConfigDir()
+
+  if (realm === 'identity') {
+    const identityConfig = resolveIdentityConfig(configDir)
+    if (!identityConfig) die('No identity configured. Run \'ig identity generate\' first.')
+    const { importPEM } = await import('../src/identity.js')
+    const kp = await importPEM(readFileSync(identityConfig.path, 'utf-8'))
+    realm = kp.pubkey
+  }
+
   writeConfig(configDir, 'default-realm', realm)
 
   if (realm === 'dataverse001') {
     console.log('Set default realm: dataverse001 (public)')
     console.log('New objects will be visible to everyone.')
   } else {
-    console.log(`Set default realm: ${realm}`)
-    console.log('New objects in this realm will only be visible to the realm owner.')
+    console.log(`Set default realm: ${realm} (identity realm — private)`)
+    console.log('New objects will only be visible to you.')
   }
 }
 
@@ -620,9 +632,9 @@ async function main() {
       if (!subcmd) {
         await showRealm()
       } else if (subcmd === 'set') {
-        setRealm()
+        await setRealm()
       } else {
-        die('Usage: ig realm [set <realm>]')
+        die('Usage: ig realm [set <realm|identity|dataverse001>]')
       }
       break
     }
