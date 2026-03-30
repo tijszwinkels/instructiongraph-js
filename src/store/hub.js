@@ -1,5 +1,6 @@
 /**
  * Hub store — HTTP-based storage backend for instructionGraph hubs.
+ * Owns its own authentication state (challenge-response → bearer token).
  */
 
 import { canonicalJSON } from '../canonical.js'
@@ -27,6 +28,9 @@ export function createHubStore({ url, token = null }) {
      * @param {string|null} t
      */
     setToken(t) { bearerToken = t },
+
+    /** @returns {string|null} */
+    getToken() { return bearerToken },
 
     /** @returns {string} */
     getUrl() { return baseUrl },
@@ -111,6 +115,56 @@ export function createHubStore({ url, token = null }) {
         console.warn(`[hub] inbound error: ${e.message}`)
         return { items: [], cursor: null }
       }
+    },
+
+    // ─── Authentication ─────────────────────────────
+
+    /**
+     * Fetch a challenge from the hub.
+     * @returns {Promise<{challenge: string, expires_at: string}>}
+     */
+    async getChallenge() {
+      const res = await fetch(`${baseUrl}/auth/challenge`, {
+        headers: { Accept: 'application/json' }
+      })
+      if (!res.ok) throw new Error(`Challenge request failed: ${res.status}`)
+      return res.json()
+    },
+
+    /**
+     * Authenticate with the hub using a signer's challenge-response.
+     * Sets the bearer token on success.
+     * @param {import('../types.js').Signer} signer
+     * @returns {Promise<{token: string, pubkey: string, expires_at: string}>}
+     */
+    async authenticate(signer) {
+      const { challenge } = await this.getChallenge()
+      const enc = new TextEncoder()
+      const signature = await signer.sign(enc.encode(challenge))
+      const res = await fetch(`${baseUrl}/auth/token`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', Accept: 'application/json' },
+        body: JSON.stringify({ pubkey: signer.pubkey, challenge, signature })
+      })
+      if (!res.ok) throw new Error(`Token exchange failed: ${res.status}`)
+      const data = await res.json()
+      bearerToken = data.token
+      return data
+    },
+
+    /**
+     * Log out and clear the bearer token.
+     * @returns {Promise<{ok: boolean}>}
+     */
+    async logout() {
+      try {
+        await fetch(`${baseUrl}/auth/logout`, {
+          method: 'POST',
+          headers: headers()
+        })
+      } catch { /* best effort */ }
+      bearerToken = null
+      return { ok: true }
     }
   }
 }

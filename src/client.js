@@ -4,8 +4,7 @@
  * createClient(opts?) → Client with get/search/inbound/build/sign/publish/create/update/delete
  */
 
-import { sign as cryptoSign, verify as cryptoVerify } from './crypto.js'
-import { canonicalJSON } from './canonical.js'
+import { sign as cryptoSign } from './crypto.js'
 import { buildItem, tombstone, makeRef, isoNow } from './object.js'
 import { deriveKeypair, importPEM, createSigner, IDENTITY_UUID, ROOT_REF, IDENTITY_TYPE_DEF } from './identity.js'
 
@@ -208,55 +207,21 @@ export function createClient(opts = {}) {
       return { ref: signed.item.ref, pubkey: signer.pubkey, ok: result.ok }
     },
 
-    // ─── Hub auth ──────────────────────────────────
+    // ─── Hub auth (delegates to store) ─────────────
 
     async authenticate() {
       requireIdentity()
-      if (!store.getUrl || !store.setToken) {
-        throw new Error('authenticate() requires a hub store with getUrl/setToken')
+      if (typeof store.authenticate !== 'function') {
+        throw new Error('authenticate() requires a store with an authenticate method (e.g. hub store)')
       }
+      return store.authenticate(signer)
+    },
 
-      const hubUrl = store.getUrl()
-
-      // Step 1: Get challenge
-      const challengeRes = await fetch(`${hubUrl}/auth/challenge`, {
-        headers: { Accept: 'application/json' }
-      })
-      if (!challengeRes.ok) throw new Error(`Challenge request failed: ${challengeRes.status}`)
-      const { challenge } = await challengeRes.json()
-
-      // Step 2: Sign challenge
-      const sig = await cryptoSign(identity.privateKey, null) // won't work — need raw sign
-      // Actually need to sign the challenge string directly
-      const enc = new TextEncoder()
-      const subtle = globalThis.crypto.subtle
-      const sigBuf = await subtle.sign(
-        { name: 'ECDSA', hash: 'SHA-256' },
-        identity.privateKey,
-        enc.encode(challenge)
-      )
-      // Convert P1363 → DER → base64
-      const { p1363ToDer } = await import('./crypto.js')
-      const derSig = p1363ToDer(new Uint8Array(sigBuf))
-      let b = ''
-      for (let i = 0; i < derSig.length; i++) b += String.fromCharCode(derSig[i])
-      const sigB64 = btoa(b)
-
-      // Step 3: Exchange for token
-      const tokenRes = await fetch(`${hubUrl}/auth/token`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json', Accept: 'application/json' },
-        body: JSON.stringify({
-          pubkey: signer.pubkey,
-          challenge,
-          signature: sigB64
-        })
-      })
-      if (!tokenRes.ok) throw new Error(`Token exchange failed: ${tokenRes.status}`)
-      const tokenData = await tokenRes.json()
-
-      store.setToken(tokenData.token)
-      return { ok: true, token: tokenData.token, pubkey: signer.pubkey }
+    async logout() {
+      if (typeof store.logout !== 'function') {
+        throw new Error('logout() requires a store with a logout method (e.g. hub store)')
+      }
+      return store.logout()
     }
   }
 
