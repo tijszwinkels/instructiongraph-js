@@ -169,6 +169,39 @@ export function createSyncStore({ local, remote }) {
       return { total: items.length, pushed, errors }
     },
 
+    /**
+     * Push all local objects to the remote hub.
+     * @param {object} [opts]
+     * @param {(progress: {ref: string, index: number, total: number, status: 'ok'|'error'}) => void} [opts.onProgress]
+     * @returns {Promise<{total: number, pushed: number, errors: number}>}
+     */
+    async pushAll(opts = {}) {
+      const { onProgress } = opts
+      const allLocal = await local.search({ limit: 100000 })
+      const items = allLocal.items || []
+      const total = items.length
+      let pushed = 0
+      let errors = 0
+
+      for (let i = 0; i < items.length; i++) {
+        const obj = items[i]
+        const ref = obj.item?.ref
+        if (!ref) continue
+        let status = 'ok'
+        try {
+          await remote.put(obj)
+          pushed++
+        } catch (e) {
+          errors++
+          status = 'error'
+          console.warn(`[sync] pushAll failed for ${ref}: ${e.message}`)
+        }
+        if (onProgress) onProgress({ ref, index: i, total, status })
+      }
+
+      return { total, pushed, errors }
+    },
+
     async inbound(ref, opts = {}) {
       // Query both in parallel
       const [localResult, remoteResult] = await Promise.all([

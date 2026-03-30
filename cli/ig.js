@@ -74,8 +74,8 @@ Commands:
   ig identity list                 List available identities
   ig server                        Show current server
   ig server set <url>              Connect to a hub server
-  ig server remove                 Disconnect (go offline)
   ig server push                   Push all local objects to server
+  ig server remove                 Disconnect (go offline)
   ig realm                              Show current default realm
   ig realm set identity                 Go private (identity realm)
   ig realm set dataverse001             Go public
