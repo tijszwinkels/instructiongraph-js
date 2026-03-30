@@ -28,6 +28,10 @@ import { generateKeypair } from '../src/crypto.js'
 const args = process.argv.slice(2)
 const cmd = args[0]
 
+function hasHelp(argv = args) {
+  return argv.includes('--help') || argv.includes('-h')
+}
+
 function flag(name) {
   const idx = args.indexOf(`--${name}`)
   if (idx === -1) return undefined
@@ -41,6 +45,17 @@ function die(msg) {
 
 function usage() {
   console.log(`ig — InstructionGraph CLI
+
+InstructionGraph is a novel, self-describing graph data format designed for
+exchanging data, concepts, and applications between LLMs. Each node carries
+instructions plus relations, so agents and humans can follow the graph to
+understand, render, and extend it.
+
+Learn more:
+  https://dataverse001.net/AxyU5_5vWmP2tO_klN4UpbZzRsuJEvJTrdwdg_gODxZJ.b3f5a7c9-2d4e-4f60-9b8a-0c1d2e3f4a5b
+
+Usage:
+  ig <command> [options]
 
 Commands:
   ig get <ref>                     Fetch object
@@ -56,7 +71,27 @@ Commands:
   ig identity activate <name>      Activate an existing identity
   ig identity list                 List available identities
   ig realm                         Show current default realm
-  ig realm set <realm>             Set default realm`)
+  ig realm set <realm>             Set default realm
+
+Run 'ig <command> --help' for command-specific help.`)
+  process.exit(0)
+}
+
+function commandUsage(command) {
+  const docs = {
+    get: `Usage: ig get <ref>\n\nFetch an object by ref and print its JSON envelope.`,
+    search: `Usage: ig search [--type T] [--by PK] [--limit N]\n\nSearch objects on the configured hub/store.`,
+    inbound: `Usage: ig inbound <ref> [--relation R] [--type T] [--limit N]\n\nList objects that point to the target ref.`,
+    verify: `Usage: ig verify <file.json>\n\nVerify an instructionGraph001 envelope on disk.`,
+    sign: `Usage: ig sign <spec.json>\n\nBuild and sign a spec, then print the canonical envelope JSON.`,
+    create: `Usage: ig create <spec.json>\n\nBuild, sign, and publish a spec to the configured store.`,
+    auth: `Usage: ig auth\n\nAuthenticate with the configured hub.`,
+    identity: `Usage: ig identity [generate|activate|list] [options]\n\nShow or manage the active identity.\n\nSubcommands:\n  ig identity generate [--name N] [--activate]\n  ig identity activate <name>\n  ig identity list`,
+    realm: `Usage: ig realm [set <realm>]\n\nShow or set the default realm used for new objects.`
+  }
+
+  if (!docs[command]) die(`Unknown command: ${command}\nRun 'ig --help' for usage.`)
+  console.log(docs[command])
   process.exit(0)
 }
 
@@ -249,6 +284,7 @@ function setRealm() {
 
 async function main() {
   if (!cmd || cmd === '--help' || cmd === '-h') usage()
+  if (hasHelp()) commandUsage(cmd)
 
   switch (cmd) {
     case 'get': {

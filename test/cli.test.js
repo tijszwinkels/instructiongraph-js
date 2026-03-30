@@ -145,6 +145,36 @@ describe('CLI', () => {
     assert.ok(stdout.includes('POST'))
   })
 
+  it('ig --help: shows InstructionGraph description and base commands', async () => {
+    const { stdout } = await ig('--help')
+    assert.match(stdout, /InstructionGraph/i)
+    assert.match(stdout, /novel, self-describing graph data format/i)
+    assert.match(stdout, /data, concepts, and applications between LLMs/i)
+    assert.match(stdout, /https:\/\/dataverse001\.net\/AxyU5_5vWmP2tO_klN4UpbZzRsuJEvJTrdwdg_gODxZJ\.b3f5a7c9-2d4e-4f60-9b8a-0c1d2e3f4a5b/)
+    assert.match(stdout, /ig get <ref>/)
+    assert.match(stdout, /ig realm\s+Show current default realm/)
+    assert.match(stdout, /ig realm set <realm>/)
+  })
+
+  it('base commands support --help', async () => {
+    const commands = [
+      ['get'],
+      ['search'],
+      ['inbound'],
+      ['verify'],
+      ['sign'],
+      ['create'],
+      ['auth'],
+      ['identity'],
+      ['realm']
+    ]
+
+    for (const command of commands) {
+      const { stdout } = await ig(...command, '--help')
+      assert.match(stdout, /Usage:/)
+    }
+  })
+
   it('ig identity: shows current identity name and pubkey', async () => {
     const { stdout } = await ig('identity')
     assert.match(stdout, /Identity: default/)
