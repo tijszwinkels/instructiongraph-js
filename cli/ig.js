@@ -306,7 +306,7 @@ async function identityGenerate() {
   }
 }
 
-function identityActivate() {
+async function identityActivate() {
   const name = args[2]
   if (!name) die('Usage: ig identity activate <name>')
 
@@ -314,9 +314,21 @@ function identityActivate() {
   const pemPath = resolveIdentityPemPath(configDir, name)
   if (!pemPath) die(`Identity not found: ${name}`)
 
+  const { importPEM } = await import('../src/identity.js')
+  const kp = await importPEM(readFileSync(pemPath, 'utf-8'))
+
   writeConfig(configDir, 'active-identity', name)
   console.log(`Activated identity: ${name}`)
-  console.log(`PEM: ${pemPath}`)
+  console.log(`Pubkey: ${kp.pubkey}`)
+
+  // If the default realm is an identity realm (explicit or implicit), follow the new identity
+  const currentRealm = readConfig(configDir, 'default-realm', null)
+  const isIdentityRealm = currentRealm === null  // implicit: identity realm by default
+    || (currentRealm !== 'dataverse001' && currentRealm !== kp.pubkey)
+  if (isIdentityRealm) {
+    writeConfig(configDir, 'default-realm', kp.pubkey)
+    console.log(`Updated default realm to identity realm: ${kp.pubkey}`)
+  }
 }
 
 function identityList() {
@@ -569,7 +581,7 @@ async function main() {
       if (subcmd === 'generate') {
         await identityGenerate()
       } else if (subcmd === 'activate') {
-        identityActivate()
+        await identityActivate()
       } else if (subcmd === 'list') {
         identityList()
       } else {

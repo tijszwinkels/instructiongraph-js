@@ -260,14 +260,63 @@ describe('CLI', () => {
   })
 
   describe('ig identity activate', () => {
-    it('activates an existing identity', async () => {
+    it('activates an existing identity and shows pubkey', async () => {
       await ig('identity', 'generate', '--name', 'ops')
       const { stdout } = await ig('identity', 'activate', 'ops')
       assert.match(stdout, /Activated identity: ops/)
+      assert.match(stdout, /Pubkey:/)
       const activeIdentity = await readFile(
         join(projectDir, '.instructionGraph', 'config', 'active-identity'), 'utf-8'
       )
       assert.equal(activeIdentity.trim(), 'ops')
+    })
+
+    it('updates default realm when switching from one identity realm to another', async () => {
+      // Generate two identities and get their pubkeys
+      await ig('identity', 'generate', '--name', 'alice')
+      const { stdout: aliceOut } = await ig('identity', 'activate', 'alice')
+      const alicePubkey = aliceOut.match(/Pubkey: (\S+)/)[1]
+
+      await ig('identity', 'generate', '--name', 'bob')
+      const { stdout: bobActivateOut } = await ig('identity', 'activate', 'bob')
+      const bobPubkey = bobActivateOut.match(/Pubkey: (\S+)/)[1]
+
+      // Set realm to alice's identity realm
+      await ig('realm', 'set', alicePubkey)
+
+      // Switch to bob — realm should follow
+      const { stdout } = await ig('identity', 'activate', 'bob')
+      assert.match(stdout, /Updated default realm/)
+
+      const realm = await readFile(
+        join(projectDir, '.instructionGraph', 'config', 'default-realm'), 'utf-8'
+      )
+      assert.equal(realm.trim(), bobPubkey)
+    })
+
+    it('updates default realm when no realm is explicitly set (implicit identity realm)', async () => {
+      await rm(join(projectDir, '.instructionGraph', 'config', 'default-realm'), { force: true })
+      await ig('identity', 'generate', '--name', 'dave')
+      const { stdout } = await ig('identity', 'activate', 'dave')
+      assert.match(stdout, /Updated default realm/)
+
+      const realm = await readFile(
+        join(projectDir, '.instructionGraph', 'config', 'default-realm'), 'utf-8'
+      )
+      const davePubkey = stdout.match(/Pubkey: (\S+)/)[1]
+      assert.equal(realm.trim(), davePubkey)
+    })
+
+    it('does not change realm when switching from dataverse001 realm', async () => {
+      await ig('realm', 'set', 'dataverse001')
+      await ig('identity', 'generate', '--name', 'carol')
+      const { stdout } = await ig('identity', 'activate', 'carol')
+      assert.doesNotMatch(stdout, /Updated default realm/)
+
+      const realm = await readFile(
+        join(projectDir, '.instructionGraph', 'config', 'default-realm'), 'utf-8'
+      )
+      assert.equal(realm.trim(), 'dataverse001')
     })
 
     it('fails if the identity does not exist', async () => {
