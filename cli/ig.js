@@ -365,7 +365,7 @@ async function showRealm() {
   console.log('  <your pubkey>    Private — only visible to you (identity realm)')
   console.log('')
   console.log('When connected to a server, all objects are uploaded, but private')
-  console.log('objects are only accessible after you authenticate (ig auth).')
+  console.log('objects are only accessible to you, after you authenticate (ig auth).')
   console.log('')
   console.log('To switch:')
   console.log('  ig realm set dataverse001        Go public')
@@ -399,8 +399,8 @@ function showServer() {
     console.log('')
     console.log('Both public and private objects are uploaded to the server.')
     console.log('Public objects (realm: dataverse001) are visible to everyone.')
-    console.log('Private objects (identity realm) are stored encrypted on the server')
-    console.log('and only accessible after you authenticate with \'ig auth\'.')
+    console.log('Private objects (identity realm) are stored on the server,')
+    console.log('but only accessible to you, after you authenticate with \'ig auth\'.')
   } else {
     console.log('No server configured (offline mode).')
     console.log('Objects are stored on local filesystem only.')
@@ -413,7 +413,7 @@ function showServer() {
     console.log('  \u2022 You can discover and fetch objects created by others')
     console.log('  \u2022 Local copies are always kept \u2014 you keep working if the server goes down')
     console.log('  \u2022 Private objects (identity realm) are uploaded too, but only you can')
-    console.log('    access them after authenticating with \'ig auth\'')
+    console.log('    access them, after you authenticate with \'ig auth\'')
   }
 }
 
@@ -429,7 +429,7 @@ function setServer() {
   console.log('Objects will now sync between local filesystem and the hub.')
   console.log('')
   console.log('Public objects (realm: dataverse001) will be visible to everyone.')
-  console.log('Private objects (identity realm) will only be accessible to you after \'ig auth\'.')
+  console.log('Private objects (identity realm) will only be accessible to you, after you authenticate with \'ig auth\'.')
 }
 
 function removeServer() {
