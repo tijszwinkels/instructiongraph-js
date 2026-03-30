@@ -1,11 +1,33 @@
 import { describe, it } from 'node:test'
 import assert from 'node:assert/strict'
+import { mkdirSync, rmSync, readFileSync, existsSync } from 'node:fs'
+import { join } from 'node:path'
+import { tmpdir } from 'node:os'
 import { createClient } from '../src/client.js'
 import { createHubStore } from '../src/store/hub.js'
-import { verify } from '../src/crypto.js'
+import { verify, sign, generateKeypair } from '../src/crypto.js'
+import { buildItem } from '../src/object.js'
 
 const HUB_URL = 'https://dataverse001.net'
 const ROOT_REF = 'AxyU5_5vWmP2tO_klN4UpbZzRsuJEvJTrdwdg_gODxZJ.00000000-0000-0000-0000-000000000000'
+
+/** Simple in-memory mock store for client tests */
+function createMockStore(initial = {}) {
+  const objects = new Map(Object.entries(initial))
+  return {
+    async get(ref) { return structuredClone(objects.get(ref) ?? null) },
+    async put(obj) { objects.set(obj.item.ref, structuredClone(obj)); return { ok: true } },
+    async search(q = {}) {
+      const items = [...objects.values()].filter(o => {
+        if (q.type && o.item.type !== q.type) return false
+        if (q.by && o.item.pubkey !== q.by) return false
+        return true
+      })
+      return { items, cursor: null }
+    },
+    async inbound() { return { items: [], cursor: null } }
+  }
+}
 
 describe('client', () => {
   describe('read-only', () => {
@@ -118,9 +140,85 @@ describe('client', () => {
     })
   })
 
+  describe('deep merge in update()', () => {
+    it('recursively merges nested content fields', async () => {
+      const store = createMockStore()
+      const ig = createClient({
+        store,
+        identity: { type: 'credentials', username: 'merge-test', password: 'merge-test-pw' }
+      })
+      await ig.ready
+
+      // Create an object owned by this identity
+      const ref = await ig.create({
+        type: 'POST',
+        content: { title: 'Original', meta: { author: 'Alice', version: 1 } }
+      })
+
+      // Patch only meta.version — meta.author should be preserved
+      await ig.update(ref, { content: { meta: { version: 2 } } })
+      const updated = await store.get(ref)
+      assert.equal(updated.item.content.title, 'Original', 'title preserved')
+      assert.equal(updated.item.content.meta.author, 'Alice', 'nested author preserved')
+      assert.equal(updated.item.content.meta.version, 2, 'nested version updated')
+      assert.equal(updated.item.revision, 1)
+    })
+
+    it('preserves immutable fields on update', async () => {
+      const store = createMockStore()
+      const ig = createClient({
+        store,
+        identity: { type: 'credentials', username: 'merge-test', password: 'merge-test-pw' }
+      })
+      await ig.ready
+
+      const ref = await ig.create({ type: 'POST', content: { title: 'Original' } })
+      const original = await store.get(ref)
+
+      // Try to change immutable fields via patch — should be ignored
+      await ig.update(ref, { id: 'hacked', pubkey: 'fake', created_at: '1999-01-01' })
+      const updated = await store.get(ref)
+      assert.equal(updated.item.id, original.item.id)
+      assert.equal(updated.item.pubkey, ig.pubkey)
+      assert.equal(updated.item.created_at, original.item.created_at)
+    })
+  })
+
+  describe('createIdentity with PEM persistence', () => {
+    it('generates keypair, publishes IDENTITY, saves PEM to disk', async () => {
+      const tmpDir = join(tmpdir(), `ig-identity-test-${Date.now()}`)
+      mkdirSync(tmpDir, { recursive: true })
+
+      try {
+        const store = createMockStore()
+        const ig = createClient({ store })
+
+        const result = await ig.createIdentity({ name: 'TestAgent', configDir: tmpDir })
+        assert.ok(result.ref)
+        assert.ok(result.pubkey)
+        assert.ok(result.ok)
+        assert.ok(result.pemPath)
+        assert.ok(existsSync(result.pemPath), 'PEM file should exist')
+
+        const pem = readFileSync(result.pemPath, 'utf-8')
+        assert.ok(pem.includes('BEGIN PRIVATE KEY'))
+
+        // Verify the published IDENTITY object
+        const identityObj = await store.get(result.ref)
+        assert.equal(identityObj.item.type, 'IDENTITY')
+        assert.equal(identityObj.item.content.name, 'TestAgent')
+        assert.equal(identityObj.item.id, '00000000-0000-0000-0000-000000000001')
+
+        // Client should now use the new identity
+        assert.equal(ig.pubkey, result.pubkey)
+      } finally {
+        rmSync(tmpDir, { recursive: true, force: true })
+      }
+    })
+  })
+
   describe('with PEM identity', () => {
     it('loads PEM and signs', async () => {
-      const { readFileSync, existsSync } = await import('node:fs')
       const pemPath = '/home/claude/projects/dataverse/.instructionGraph/identities/default/private.pem'
       if (!existsSync(pemPath)) {
         console.log('Skipping PEM client test — no local key')

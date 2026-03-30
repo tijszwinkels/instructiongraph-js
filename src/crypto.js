@@ -82,9 +82,11 @@ function derToP1363(der) {
 
 /**
  * Generate a new ECDSA P-256 keypair.
+ * @param {object} [opts]
+ * @param {boolean} [opts.extractable=false] - set true if you need to export the private key (e.g. to PEM)
  * @returns {Promise<{ pubkey: string, privateKey: CryptoKey }>}
  */
-export async function generateKeypair() {
+export async function generateKeypair({ extractable = false } = {}) {
   const kp = await subtle.generateKey(
     { name: 'ECDSA', namedCurve: 'P-256' },
     true,
@@ -98,7 +100,7 @@ export async function generateKeypair() {
   const privateKey = await subtle.importKey(
     'jwk', jwk,
     { name: 'ECDSA', namedCurve: 'P-256' },
-    false,
+    extractable,
     ['sign']
   )
   return { pubkey, privateKey }

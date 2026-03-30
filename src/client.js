@@ -9,6 +9,24 @@ import { buildItem, tombstone, makeRef, isoNow } from './object.js'
 import { deriveKeypair, importPEM, createSigner, IDENTITY_UUID, ROOT_REF, IDENTITY_TYPE_DEF } from './identity.js'
 import { validateSchema } from './validation.js'
 
+// ─── Deep merge utility ──────────────────────────────────────────
+
+function isPlainObject(v) {
+  return v !== null && typeof v === 'object' && !Array.isArray(v)
+}
+
+/** Recursively merge patch into target. Arrays and non-objects are replaced. */
+function deepMerge(target, patch) {
+  if (!isPlainObject(target) || !isPlainObject(patch)) return structuredClone(patch)
+  const merged = structuredClone(target)
+  for (const [key, value] of Object.entries(patch)) {
+    merged[key] = isPlainObject(value) && isPlainObject(merged[key])
+      ? deepMerge(merged[key], value)
+      : structuredClone(value)
+  }
+  return merged
+}
+
 /**
  * Resolve an identity config to { pubkey, privateKey }.
  * @param {import('./types.js').IdentityConfig} config
@@ -175,20 +193,18 @@ export function createClient(opts = {}) {
       let updated
 
       if (typeof patch === 'function') {
-        updated = patch(JSON.parse(JSON.stringify(orig)))
+        updated = patch(structuredClone(orig))
         if (!updated) throw new Error('Update callback must return the modified item')
       } else {
-        // Merge content
-        updated = { ...orig }
-        if (patch.content) {
-          updated.content = { ...orig.content, ...patch.content }
-        }
-        if (patch.relations) {
-          updated.relations = { ...orig.relations, ...patch.relations }
-        }
-        if (patch.name !== undefined) updated.name = patch.name
-        if (patch.instruction !== undefined) updated.instruction = patch.instruction
+        // Deep merge: nested content fields are merged recursively
+        updated = deepMerge(orig, patch)
       }
+
+      // Immutable fields: always preserved from original
+      updated.id = orig.id
+      updated.ref = orig.ref
+      updated.pubkey = orig.pubkey
+      updated.created_at = orig.created_at
 
       updated.updated_at = isoNow()
       updated.revision = (orig.revision || 0) + 1
@@ -218,11 +234,22 @@ export function createClient(opts = {}) {
 
     // ─── Identity creation ─────────────────────────
 
+    /**
+     * Create a new identity: generate keypair, publish IDENTITY object, optionally save PEM.
+     * @param {object} [identityOpts]
+     * @param {string} [identityOpts.name] - display name
+     * @param {string} [identityOpts.configDir] - directory to save the PEM (e.g. '.instructionGraph')
+     * @returns {Promise<{ref: string, pubkey: string, ok: boolean, pemPath?: string}>}
+     */
     async createIdentity(identityOpts = {}) {
-      requireIdentity()
-      const name = identityOpts.name || `Agent-${signer.pubkey.slice(0, 4)}`
+      // Generate a fresh keypair (extractable so we can export to PEM)
+      const { generateKeypair } = await import('./crypto.js')
+      const kp = await generateKeypair({ extractable: true })
+      const newSigner = createSigner(kp)
+      const name = identityOpts.name || `Agent-${kp.pubkey.slice(-4)}`
+
       const item = buildItem({
-        pubkey: signer.pubkey,
+        pubkey: kp.pubkey,
         id: IDENTITY_UUID,
         type: 'IDENTITY',
         instruction: 'Identity object for a dataverse participant. The pubkey field is the compressed raw EC point used to verify signatures. Display name from content.name.',
@@ -233,9 +260,43 @@ export function createClient(opts = {}) {
           type_def: [{ ref: IDENTITY_TYPE_DEF }]
         }
       })
-      const signed = await client.sign(item)
-      const result = await client.publish(signed)
-      return { ref: signed.item.ref, pubkey: signer.pubkey, ok: result.ok }
+
+      const signature = await cryptoSign(kp.privateKey, item)
+      const signed = { is: 'instructionGraph001', signature, item }
+      const result = await store.put(signed)
+
+      // Save PEM to disk if configDir is provided (Node.js only)
+      let pemPath = null
+      if (identityOpts.configDir) {
+        try {
+          const { mkdirSync, writeFileSync } = await import('node:fs')
+          const { join } = await import('node:path')
+          const identityDir = join(identityOpts.configDir, 'identities', name)
+          mkdirSync(identityDir, { recursive: true })
+          pemPath = join(identityDir, 'private.pem')
+          const pkcs8 = new Uint8Array(
+            await globalThis.crypto.subtle.exportKey('pkcs8', kp.privateKey)
+          )
+          let b = ''
+          for (let i = 0; i < pkcs8.length; i++) b += String.fromCharCode(pkcs8[i])
+          const b64 = btoa(b).match(/.{1,64}/g).join('\n')
+          writeFileSync(pemPath, `-----BEGIN PRIVATE KEY-----\n${b64}\n-----END PRIVATE KEY-----\n`)
+        } catch (e) {
+          console.warn(`[client] Failed to save PEM: ${e.message}`)
+          pemPath = null
+        }
+      }
+
+      // Update client to use the new identity
+      identity = kp
+      signer = newSigner
+
+      return {
+        ref: signed.item.ref,
+        pubkey: kp.pubkey,
+        ok: result.ok,
+        ...(pemPath ? { pemPath } : {})
+      }
     },
 
     // ─── Hub auth (delegates to store) ─────────────
