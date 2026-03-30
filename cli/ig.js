@@ -52,7 +52,10 @@ Commands:
   ig auth                          Hub authentication
   ig identity                      Show current identity
   ig identity generate [--name N]  Generate a new identity
-                       [--activate] Set as active identity`)
+                       [--activate] Set as active identity
+  ig identity activate <name>      Activate an existing identity
+  ig realm                         Show current default realm
+  ig realm set <realm>             Set default realm`)
   process.exit(0)
 }
 
@@ -92,10 +95,24 @@ function resolveIdentityConfig(configDir) {
 
   for (const pemPath of candidates) {
     if (existsSync(pemPath)) {
-      return { type: 'pem-file', path: pemPath }
+      return { type: 'pem-file', path: pemPath, name: identityName }
     }
   }
   return null
+}
+
+function writeConfig(configDir, name, value) {
+  const resolvedConfigDir = configDir || join(process.cwd(), '.instructionGraph')
+  const configPath = join(resolvedConfigDir, 'config')
+  mkdirSync(configPath, { recursive: true })
+  writeFileSync(join(configPath, name), `${value}\n`)
+}
+
+function resolveIdentityPemPath(configDir, identityName) {
+  const candidates = []
+  if (configDir) candidates.push(join(configDir, 'identities', identityName, 'private.pem'))
+  candidates.push(join(process.env.HOME || '~', '.instructionGraph', 'identities', identityName, 'private.pem'))
+  return candidates.find(existsSync) || null
 }
 
 async function makeClient() {
@@ -153,11 +170,47 @@ async function identityGenerate() {
 
   // Optionally set as active identity
   if (args.includes('--activate')) {
-    const configPath = join(configDir, 'config')
-    mkdirSync(configPath, { recursive: true })
-    writeFileSync(join(configPath, 'active-identity'), name)
+    writeConfig(configDir, 'active-identity', name)
     console.log('Set as active identity')
   }
+}
+
+function identityActivate() {
+  const name = args[2]
+  if (!name) die('Usage: ig identity activate <name>')
+
+  const configDir = findConfigDir() || join(process.cwd(), '.instructionGraph')
+  const pemPath = resolveIdentityPemPath(configDir, name)
+  if (!pemPath) die(`Identity not found: ${name}`)
+
+  writeConfig(configDir, 'active-identity', name)
+  console.log(`Activated identity: ${name}`)
+  console.log(`PEM: ${pemPath}`)
+}
+
+async function showRealm() {
+  const { client } = await makeClient()
+  await client.ready
+  const configuredRealm = readConfig(findConfigDir(), 'default-realm', null)
+
+  if (configuredRealm) {
+    console.log(`Current realm: ${configuredRealm}`)
+    return
+  }
+
+  if (client.pubkey) {
+    console.log(`Current realm: ${client.pubkey} (pubkey realm default)`)
+  } else {
+    console.log('Current realm: <no identity configured>')
+  }
+}
+
+function setRealm() {
+  const realm = args[2]
+  if (!realm) die('Usage: ig realm set <realm>')
+  const configDir = findConfigDir() || join(process.cwd(), '.instructionGraph')
+  writeConfig(configDir, 'default-realm', realm)
+  console.log(`Set default realm: ${realm}`)
 }
 
 // ─── Commands ────────────────────────────────────────────────────
@@ -260,6 +313,8 @@ async function main() {
       const subcmd = args[1]
       if (subcmd === 'generate') {
         await identityGenerate()
+      } else if (subcmd === 'activate') {
+        identityActivate()
       } else {
         const { client } = await makeClient()
         await client.ready
@@ -268,6 +323,18 @@ async function main() {
         } else {
           console.log('No identity configured')
         }
+      }
+      break
+    }
+
+    case 'realm': {
+      const subcmd = args[1]
+      if (!subcmd) {
+        await showRealm()
+      } else if (subcmd === 'set') {
+        setRealm()
+      } else {
+        die('Usage: ig realm [set <realm>]')
       }
       break
     }

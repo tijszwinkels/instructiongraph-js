@@ -9,7 +9,7 @@ import http from 'node:http'
 import { execFile as execFileCb } from 'node:child_process'
 import { promisify } from 'node:util'
 import { generateKeyPairSync } from 'node:crypto'
-import { mkdtemp, mkdir, writeFile, readFile, access, readdir } from 'node:fs/promises'
+import { mkdtemp, mkdir, writeFile, readFile, access, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { verify } from '../src/crypto.js'
@@ -196,6 +196,54 @@ describe('CLI', () => {
         ig('identity', 'generate', '--name', 'work'),
         err => err.stderr.includes('already exists')
       )
+    })
+  })
+
+  describe('ig identity activate', () => {
+    it('activates an existing identity', async () => {
+      await ig('identity', 'generate', '--name', 'ops')
+      const { stdout } = await ig('identity', 'activate', 'ops')
+      assert.match(stdout, /Activated identity: ops/)
+      const activeIdentity = await readFile(
+        join(projectDir, '.instructionGraph', 'config', 'active-identity'), 'utf-8'
+      )
+      assert.equal(activeIdentity.trim(), 'ops')
+    })
+
+    it('fails if the identity does not exist', async () => {
+      await assert.rejects(
+        ig('identity', 'activate', 'missing'),
+        err => err.stderr.includes('not found')
+      )
+    })
+  })
+
+  describe('ig realm', () => {
+    it('shows pubkey realm by default when no default-realm config is set', async () => {
+      await rm(join(projectDir, '.instructionGraph', 'config', 'default-realm'), { force: true })
+      const { stdout } = await ig('realm')
+      assert.match(stdout, /Current realm: .* \(pubkey realm default\)/)
+      assert.doesNotMatch(stdout, /^Current realm: dataverse001$/m)
+    })
+
+    it('sets and shows the configured default realm', async () => {
+      const { stdout: setOut } = await ig('realm', 'set', 'dataverse001')
+      assert.match(setOut, /Set default realm: dataverse001/)
+
+      const configRealm = await readFile(join(projectDir, '.instructionGraph', 'config', 'default-realm'), 'utf-8')
+      assert.equal(configRealm.trim(), 'dataverse001')
+
+      const { stdout } = await ig('realm')
+      assert.match(stdout, /^Current realm: dataverse001$/m)
+    })
+
+    it('uses configured default realm when signing new objects', async () => {
+      await ig('realm', 'set', 'dataverse001')
+      const specPath = join(projectDir, 'realm-test-spec.json')
+      await writeFile(specPath, JSON.stringify({ type: 'NOTE', content: { text: 'realm-test' } }))
+      const { stdout: signedJson } = await ig('sign', specPath)
+      const signed = JSON.parse(signedJson)
+      assert.deepEqual(signed.item.in, ['dataverse001'])
     })
   })
 })
