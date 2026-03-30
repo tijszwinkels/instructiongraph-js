@@ -185,21 +185,41 @@ async function resolveConfiguredIdentity(options, env) {
   return createSigner({ type: 'pem-file', path: identityPath })
 }
 
+async function writeLocalConfig(state, name, value) {
+  if (!state.node || !state.localBase) return null
+  const configDir = state.node.path.join(state.localBase, 'config')
+  await state.node.fs.mkdir(configDir, { recursive: true })
+  const filePath = state.node.path.join(configDir, name)
+  await state.node.fs.writeFile(filePath, value, 'utf8')
+  return filePath
+}
+
+async function removeLocalConfig(state, name) {
+  if (!state.node || !state.localBase) return
+  try {
+    await state.node.fs.rm(state.node.path.join(state.localBase, 'config', name))
+  } catch (error) {
+    if (error?.code !== 'ENOENT') throw error
+  }
+}
+
 async function resolveState(options) {
   const env = await resolveEnvironment(options)
   const hubUrl = options.hubUrl ?? await readOverlayConfig(env, 'hub-url', DEFAULT_HUB_URL)
   const defaultRealm = options.defaultRealm ?? await readOverlayConfig(env, 'default-realm', DEFAULT_REALM)
+  const hubToken = options.token ?? await readOverlayConfig(env, 'hub-token', null)
   const signer = await resolveConfiguredIdentity(options, env)
 
   return {
     ...env,
     hubUrl,
     defaultRealm,
+    hubToken,
     signer,
     store: options.store ?? createHubStore({
       url: hubUrl,
       fetch: options.fetch,
-      token: options.token,
+      token: hubToken,
       headers: options.headers,
       credentials: options.credentials,
       userAgent: options.userAgent,
@@ -365,6 +385,32 @@ export function createClient(options = {}) {
       const signedObject = await signEnvelope(signer, deletedItem)
       await publishOrThrow(state.store, signedObject)
       return ref
+    },
+
+    async authenticate() {
+      const { state, signer } = await requireSigner()
+      if (typeof state.store.authenticate !== 'function') {
+        throw new Error('Configured store does not support authentication')
+      }
+
+      const result = await state.store.authenticate(signer)
+      if (result?.token) {
+        state.hubToken = result.token
+        await writeLocalConfig(state, 'hub-token', `${result.token}\n`)
+      }
+      return result
+    },
+
+    async logout() {
+      const state = await getState()
+      if (typeof state.store.logout !== 'function') {
+        throw new Error('Configured store does not support logout')
+      }
+
+      const result = await state.store.logout()
+      state.hubToken = null
+      await removeLocalConfig(state, 'hub-token')
+      return result
     },
 
     async createIdentity(identityOptions = {}) {
