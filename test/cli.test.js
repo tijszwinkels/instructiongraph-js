@@ -87,7 +87,10 @@ describe('CLI', () => {
   after(async () => { await hub.close() })
 
   function ig(...args) {
-    return execFile('node', [CLI, ...args], { cwd: projectDir })
+    return execFile('node', [CLI, ...args], {
+      cwd: projectDir,
+      env: { ...process.env, INSTRUCTIONGRAPH_DIR: join(projectDir, '.instructionGraph') }
+    })
   }
 
   it('ig verify: accepts valid signature, rejects tampered', async () => {
@@ -227,6 +230,32 @@ describe('CLI', () => {
         ig('identity', 'generate', '--name', 'work'),
         err => err.stderr.includes('already exists')
       )
+    })
+
+    it('generates identity with --local flag in cwd', async () => {
+      const localDir = await mkdtemp(join(tmpdir(), 'ig-local-test-'))
+      function igLocal(...a) {
+        const env = { ...process.env }
+        delete env.INSTRUCTIONGRAPH_DIR
+        return execFile('node', [CLI, ...a], { cwd: localDir, env })
+      }
+
+      const { stdout } = await igLocal('identity', 'generate', '--name', 'local-id', '--local')
+      assert.match(stdout, /Initialized InstructionGraph/)
+      assert.match(stdout, /Generated identity: local-id/)
+
+      // Verify directory structure was bootstrapped
+      await access(join(localDir, '.instructionGraph', 'data'))
+      await access(join(localDir, '.instructionGraph', 'config'))
+      await access(join(localDir, '.instructionGraph', 'identities', 'local-id', 'private.pem'))
+
+      // First identity should be auto-activated
+      const active = await readFile(
+        join(localDir, '.instructionGraph', 'config', 'active-identity'), 'utf-8'
+      )
+      assert.equal(active.trim(), 'local-id')
+
+      await rm(localDir, { recursive: true })
     })
   })
 

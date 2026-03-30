@@ -67,6 +67,7 @@ Commands:
   ig auth                          Hub authentication
   ig identity                      Show current identity
   ig identity generate [--name N]  Generate a new identity
+                       [--local]    Use ./.instructionGraph instead of ~/
                        [--activate] Set as active identity
   ig identity activate <name>      Activate an existing identity
   ig identity list                 List available identities
@@ -86,7 +87,7 @@ function commandUsage(command) {
     sign: `Usage: ig sign <spec.json>\n\nBuild and sign a spec, then print the canonical envelope JSON.`,
     create: `Usage: ig create <spec.json>\n\nBuild, sign, and publish a spec to the configured store.`,
     auth: `Usage: ig auth\n\nAuthenticate with the configured hub.`,
-    identity: `Usage: ig identity [generate|activate|list] [options]\n\nShow or manage the active identity.\n\nSubcommands:\n  ig identity generate [--name N] [--activate]\n  ig identity activate <name>\n  ig identity list`,
+    identity: `Usage: ig identity [generate|activate|list] [options]\n\nShow or manage the active identity.\n\nSubcommands:\n  ig identity generate [--name N] [--local] [--activate]\n  ig identity activate <name>\n  ig identity list\n\nEnvironment:\n  INSTRUCTIONGRAPH_DIR  Override config directory location`,
     realm: `Usage: ig realm [set <realm>]\n\nShow or set the default realm used for new objects.`
   }
 
@@ -97,37 +98,48 @@ function commandUsage(command) {
 
 // ─── Config resolution ───────────────────────────────────────────
 
+function homeConfigDir() {
+  return join(process.env.HOME || '~', '.instructionGraph')
+}
+
 function findConfigDir() {
-  // Walk up from cwd looking for .instructionGraph/
+  // 1. Env var override
+  if (process.env.INSTRUCTIONGRAPH_DIR) return process.env.INSTRUCTIONGRAPH_DIR
+
+  // 2. Walk up from cwd for project-local .instructionGraph/
   let dir = process.cwd()
   while (dir !== '/') {
     const igDir = join(dir, '.instructionGraph')
-    if (existsSync(join(igDir, 'config')) || existsSync(join(igDir, 'data'))) return igDir
+    if (existsSync(join(igDir, 'config')) || existsSync(join(igDir, 'data')) || existsSync(join(igDir, 'identities'))) return igDir
     dir = resolve(dir, '..')
   }
-  // Fall back to ~/.instructionGraph
-  const home = join(process.env.HOME || '~', '.instructionGraph')
-  if (existsSync(home)) return home
-  return null
+
+  // 3. Default: ~/.instructionGraph (always — never null)
+  return homeConfigDir()
 }
 
 function readConfig(configDir, name, defaultVal) {
-  if (configDir) {
-    const localPath = join(configDir, 'config', name)
-    if (existsSync(localPath)) return readFileSync(localPath, 'utf-8').trim()
+  const localPath = join(configDir, 'config', name)
+  if (existsSync(localPath)) return readFileSync(localPath, 'utf-8').trim()
+
+  // Fall back to home config if configDir is project-local
+  const home = homeConfigDir()
+  if (configDir !== home) {
+    const homePath = join(home, 'config', name)
+    if (existsSync(homePath)) return readFileSync(homePath, 'utf-8').trim()
   }
-  const homePath = join(process.env.HOME || '~', '.instructionGraph', 'config', name)
-  if (existsSync(homePath)) return readFileSync(homePath, 'utf-8').trim()
   return defaultVal
 }
 
 function resolveIdentityConfig(configDir) {
   const identityName = readConfig(configDir, 'active-identity', 'default')
 
-  // Check local first, then home
-  const candidates = []
-  if (configDir) candidates.push(join(configDir, 'identities', identityName, 'private.pem'))
-  candidates.push(join(process.env.HOME || '~', '.instructionGraph', 'identities', identityName, 'private.pem'))
+  // Check configDir first, then home (if different)
+  const candidates = [join(configDir, 'identities', identityName, 'private.pem')]
+  const home = homeConfigDir()
+  if (configDir !== home) {
+    candidates.push(join(home, 'identities', identityName, 'private.pem'))
+  }
 
   for (const pemPath of candidates) {
     if (existsSync(pemPath)) {
@@ -138,23 +150,36 @@ function resolveIdentityConfig(configDir) {
 }
 
 function writeConfig(configDir, name, value) {
-  const resolvedConfigDir = configDir || join(process.cwd(), '.instructionGraph')
-  const configPath = join(resolvedConfigDir, 'config')
+  const configPath = join(configDir, 'config')
   mkdirSync(configPath, { recursive: true })
   writeFileSync(join(configPath, name), `${value}\n`)
 }
 
 function resolveIdentityPemPath(configDir, identityName) {
-  const candidates = []
-  if (configDir) candidates.push(join(configDir, 'identities', identityName, 'private.pem'))
-  candidates.push(join(process.env.HOME || '~', '.instructionGraph', 'identities', identityName, 'private.pem'))
+  const candidates = [join(configDir, 'identities', identityName, 'private.pem')]
+  const home = homeConfigDir()
+  if (configDir !== home) {
+    candidates.push(join(home, 'identities', identityName, 'private.pem'))
+  }
   return candidates.find(existsSync) || null
 }
 
+/** List identities only in the given configDir (no home fallback). */
+function listLocalIdentityNames(configDir) {
+  const dir = join(configDir, 'identities')
+  const names = []
+  if (!existsSync(dir)) return names
+  for (const entry of readdirSync(dir, { withFileTypes: true })) {
+    if (!entry.isDirectory()) continue
+    if (existsSync(join(dir, entry.name, 'private.pem'))) names.push(entry.name)
+  }
+  return names.sort()
+}
+
 function listIdentityNames(configDir) {
-  const dirs = []
-  if (configDir) dirs.push(join(configDir, 'identities'))
-  dirs.push(join(process.env.HOME || '~', '.instructionGraph', 'identities'))
+  const dirs = [join(configDir, 'identities')]
+  const home = homeConfigDir()
+  if (configDir !== home) dirs.push(join(home, 'identities'))
 
   const names = new Set()
   for (const dir of dirs) {
@@ -191,15 +216,29 @@ async function makeClient() {
 // ─── Identity generation ─────────────────────────────────────────
 
 async function identityGenerate() {
-  const configDir = findConfigDir() || join(process.cwd(), '.instructionGraph')
-  const name = flag('name') || 'default'
+  // Determine target directory: --local → ./.instructionGraph, else default
+  let configDir
+  if (args.includes('--local')) {
+    configDir = join(process.cwd(), '.instructionGraph')
+  } else if (process.env.INSTRUCTIONGRAPH_DIR) {
+    configDir = process.env.INSTRUCTIONGRAPH_DIR
+  } else {
+    configDir = homeConfigDir()
+  }
 
+  const name = flag('name') || 'default'
   const identityDir = join(configDir, 'identities', name)
   const pemPath = join(identityDir, 'private.pem')
 
   if (existsSync(pemPath)) {
     die(`Identity "${name}" already exists at ${pemPath}`)
   }
+
+  // Bootstrap: create full directory structure if this is the first identity
+  const isFirstSetup = !existsSync(configDir)
+  mkdirSync(join(configDir, 'data'), { recursive: true })
+  mkdirSync(join(configDir, 'config'), { recursive: true })
+  mkdirSync(identityDir, { recursive: true })
 
   // Generate extractable keypair so we can export to PEM
   const kp = await generateKeypair({ extractable: true })
@@ -213,17 +252,26 @@ async function identityGenerate() {
   const b64 = btoa(b).match(/.{1,64}/g).join('\n')
   const pem = `-----BEGIN PRIVATE KEY-----\n${b64}\n-----END PRIVATE KEY-----\n`
 
-  mkdirSync(identityDir, { recursive: true })
   writeFileSync(pemPath, pem, { mode: 0o600 })
+
+  if (isFirstSetup) {
+    console.log(`Initialized InstructionGraph at ${configDir}`)
+    console.log(`  Created: ${join(configDir, 'data/')}`)
+    console.log(`  Created: ${join(configDir, 'config/')}`)
+    console.log(`  Created: ${join(configDir, 'identities/')}`)
+  }
 
   console.log(`Generated identity: ${name}`)
   console.log(`Pubkey: ${kp.pubkey}`)
   console.log(`PEM saved: ${pemPath}`)
 
-  // Optionally set as active identity
-  if (args.includes('--activate')) {
+  // Auto-activate first identity in this configDir, or when --activate is passed
+  const localIdentities = listLocalIdentityNames(configDir)
+  if (args.includes('--activate') || localIdentities.length <= 1) {
     writeConfig(configDir, 'active-identity', name)
-    console.log('Set as active identity')
+    if (args.includes('--activate') || isFirstSetup) {
+      console.log('Set as active identity')
+    }
   }
 }
 
@@ -231,7 +279,7 @@ function identityActivate() {
   const name = args[2]
   if (!name) die('Usage: ig identity activate <name>')
 
-  const configDir = findConfigDir() || join(process.cwd(), '.instructionGraph')
+  const configDir = findConfigDir()
   const pemPath = resolveIdentityPemPath(configDir, name)
   if (!pemPath) die(`Identity not found: ${name}`)
 
