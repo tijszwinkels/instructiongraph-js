@@ -9,29 +9,59 @@ function requireSubtle() {
   return subtle
 }
 
+function encodeBase64(binary) {
+  if (typeof globalThis.btoa === 'function') return globalThis.btoa(binary)
+  if (typeof Buffer !== 'undefined') return Buffer.from(binary, 'binary').toString('base64')
+  throw new Error('No base64 encoder available in this runtime')
+}
+
+function decodeBase64(value) {
+  if (typeof globalThis.atob === 'function') return globalThis.atob(value)
+  if (typeof Buffer !== 'undefined') return Buffer.from(value, 'base64').toString('binary')
+  throw new Error('No base64 decoder available in this runtime')
+}
+
+function bytesToBinary(bytes) {
+  let binary = ''
+  for (const byte of bytes) binary += String.fromCharCode(byte)
+  return binary
+}
+
+function binaryToBytes(binary) {
+  const bytes = new Uint8Array(binary.length)
+  for (let index = 0; index < binary.length; index += 1) {
+    bytes[index] = binary.charCodeAt(index)
+  }
+  return bytes
+}
+
 export function bytesToBase64(bytes) {
-  return Buffer.from(bytes).toString('base64')
+  return encodeBase64(bytesToBinary(bytes))
 }
 
 export function base64ToBytes(value) {
-  return new Uint8Array(Buffer.from(value, 'base64'))
+  return binaryToBytes(decodeBase64(value))
 }
 
 export function bytesToBase64url(bytes) {
-  return Buffer.from(bytes)
-    .toString('base64')
+  return bytesToBase64(bytes)
     .replace(/\+/g, '-')
     .replace(/\//g, '_')
     .replace(/=+$/g, '')
 }
 
 export function base64urlToBytes(value) {
-  const padded = value.replace(/-/g, '+').replace(/_/g, '/') + '==='.slice((value.length + 3) % 4)
-  return new Uint8Array(Buffer.from(padded, 'base64'))
+  const padding = '='.repeat((4 - (value.length % 4)) % 4)
+  return base64ToBytes(value.replace(/-/g, '+').replace(/_/g, '/') + padding)
 }
 
 export function hexToBytes(hex) {
-  return new Uint8Array(Buffer.from(hex, 'hex'))
+  const clean = hex.length % 2 === 0 ? hex : `0${hex}`
+  const bytes = new Uint8Array(clean.length / 2)
+  for (let index = 0; index < clean.length; index += 2) {
+    bytes[index / 2] = Number.parseInt(clean.slice(index, index + 2), 16)
+  }
+  return bytes
 }
 
 export function p1363ToDer(signature) {

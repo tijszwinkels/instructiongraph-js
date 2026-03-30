@@ -10,6 +10,7 @@ export {
   verifyBytes,
   verifyItemSignature,
 } from './crypto.js'
+export { deriveKeypair, deriveSalt, createSigner, importPEM } from './identity.js'
 export { buildItem, isEnvelope, isoNow, makeRef, parseRef, tombstone } from './object.js'
 export { createHubStore } from './store/hub.js'
 export { createFsStore } from './store/fs.js'
