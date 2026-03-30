@@ -4,61 +4,28 @@
  */
 
 import { canonicalJSON } from './canonical.js'
+import { base64urlEncode, bytesToBase64, base64Decode } from './encoding.js'
+import { compressFromJwk, decompressToJwk } from './ec.js'
 
 const subtle = globalThis.crypto.subtle
 
-// ─── Encoding helpers ────────────────────────────────────────────
-
-/** @param {Uint8Array} bytes @returns {string} base64url (no padding) */
-export function base64urlEncode(bytes) {
-  let b = ''
-  for (let i = 0; i < bytes.length; i++) b += String.fromCharCode(bytes[i])
-  return btoa(b).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '')
-}
-
-/** @param {string} s @returns {Uint8Array} */
-export function base64urlDecode(s) {
-  s = s.replace(/-/g, '+').replace(/_/g, '/')
-  while (s.length % 4) s += '='
-  const bin = atob(s)
-  const bytes = new Uint8Array(bin.length)
-  for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i)
-  return bytes
-}
-
-/** @param {Uint8Array} bytes @returns {string} standard base64 */
-function bytesToBase64(bytes) {
-  let b = ''
-  for (let i = 0; i < bytes.length; i++) b += String.fromCharCode(bytes[i])
-  return btoa(b)
-}
-
-/** @param {string} s standard base64 @returns {Uint8Array} */
-function base64Decode(s) {
-  const bin = atob(s)
-  const bytes = new Uint8Array(bin.length)
-  for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i)
-  return bytes
-}
+// Re-export encoding helpers that are part of the public API
+export { base64urlEncode, base64urlDecode } from './encoding.js'
 
 // ─── Signature format conversion ─────────────────────────────────
 
 /**
  * Convert IEEE P1363 signature (r‖s, 64 bytes) to DER format.
  * Web Crypto produces P1363; OpenSSL/hub expect DER.
- * @param {Uint8Array} sig - 64-byte P1363 signature
- * @returns {Uint8Array} DER-encoded signature
  */
 export function p1363ToDer(sig) {
   const r = sig.slice(0, 32)
   const s = sig.slice(32, 64)
 
   function encInt(bytes) {
-    // Strip leading zeros but keep at least one byte
     let i = 0
     while (i < bytes.length - 1 && bytes[i] === 0) i++
     const trimmed = bytes.slice(i)
-    // If high bit set, prepend 0x00 for positive integer
     if (trimmed[0] & 0x80) {
       const padded = new Uint8Array(trimmed.length + 1)
       padded.set(trimmed, 1)
@@ -83,12 +50,9 @@ export function p1363ToDer(sig) {
 
 /**
  * Convert DER-encoded signature to IEEE P1363 (r‖s, 64 bytes).
- * @param {Uint8Array} der
- * @returns {Uint8Array} 64-byte P1363 signature
  */
 function derToP1363(der) {
-  // 0x30 <len> 0x02 <rlen> <r...> 0x02 <slen> <s...>
-  let pos = 2 // skip SEQUENCE tag + length
+  let pos = 2
   if (der[0] !== 0x30) throw new Error('Invalid DER: expected SEQUENCE')
 
   pos++ // skip 0x02
@@ -100,10 +64,9 @@ function derToP1363(der) {
   const sLen = der[pos++]
   const sBytes = der.slice(pos, pos + sLen)
 
-  // Pad/trim to 32 bytes each
   function padTo32(bytes) {
     if (bytes.length === 32) return bytes
-    if (bytes.length > 32) return bytes.slice(bytes.length - 32) // strip leading zero
+    if (bytes.length > 32) return bytes.slice(bytes.length - 32)
     const padded = new Uint8Array(32)
     padded.set(bytes, 32 - bytes.length)
     return padded
@@ -112,83 +75,6 @@ function derToP1363(der) {
   const result = new Uint8Array(64)
   result.set(padTo32(rBytes), 0)
   result.set(padTo32(sBytes), 32)
-  return result
-}
-
-// ─── Pubkey compression ──────────────────────────────────────────
-
-/**
- * Compress an EC P-256 public key from JWK x,y coordinates.
- * @param {string} xB64url - x coordinate, base64url
- * @param {string} yB64url - y coordinate, base64url
- * @returns {string} compressed pubkey, base64url (44 chars)
- */
-function compressFromJwk(xB64url, yB64url) {
-  const xBytes = base64urlDecode(xB64url)
-  const yBytes = base64urlDecode(yB64url)
-  // Compression: 0x02 if y is even, 0x03 if odd
-  const prefix = (yBytes[yBytes.length - 1] & 1) ? 0x03 : 0x02
-  const compressed = new Uint8Array(33)
-  compressed[0] = prefix
-  compressed.set(xBytes, 1)
-  return base64urlEncode(compressed)
-}
-
-/**
- * Decompress a P-256 compressed point to JWK x,y.
- * Uses the curve equation y² = x³ + ax + b (mod p) to recover y.
- * @param {string} compressedB64url
- * @returns {{ x: string, y: string }} base64url coordinates
- */
-function decompressToJwk(compressedB64url) {
-  const bytes = base64urlDecode(compressedB64url)
-  if (bytes.length !== 33) throw new Error(`Invalid compressed pubkey length: ${bytes.length}`)
-  const prefix = bytes[0]
-  if (prefix !== 0x02 && prefix !== 0x03) throw new Error(`Invalid compression prefix: 0x${prefix.toString(16)}`)
-
-  const xBytes = bytes.slice(1)
-
-  // P-256 parameters
-  const p = 0xFFFFFFFF00000001000000000000000000000000FFFFFFFFFFFFFFFFFFFFFFFFn
-  const a = p - 3n
-  const b = 0x5AC635D8AA3A93E7B3EBBD55769886BC651D06B0CC53B0F63BCE3C3E27D2604Bn
-
-  const x = bytesToBigInt(xBytes)
-  const rhs = (modPow(x, 3n, p) + a * x % p + b) % p
-  // Tonelli-Shanks not needed for p ≡ 3 mod 4: y = rhs^((p+1)/4)
-  let y = modPow(((rhs % p) + p) % p, (p + 1n) / 4n, p)
-
-  const isOdd = !!(prefix & 1)
-  const yIsOdd = !!(y & 1n)
-  if (isOdd !== yIsOdd) y = p - y
-
-  return {
-    x: base64urlEncode(bigIntToBytes(x, 32)),
-    y: base64urlEncode(bigIntToBytes(y, 32)),
-  }
-}
-
-function bytesToBigInt(bytes) {
-  let h = '0x'
-  for (let i = 0; i < bytes.length; i++) h += bytes[i].toString(16).padStart(2, '0')
-  return BigInt(h)
-}
-
-function bigIntToBytes(n, len) {
-  const hex = n.toString(16).padStart(len * 2, '0')
-  const bytes = new Uint8Array(len)
-  for (let i = 0; i < len; i++) bytes[i] = parseInt(hex.substr(i * 2, 2), 16)
-  return bytes
-}
-
-function modPow(base, exp, mod) {
-  let result = 1n
-  base = ((base % mod) + mod) % mod
-  while (exp > 0n) {
-    if (exp & 1n) result = (result * base) % mod
-    exp >>= 1n
-    base = (base * base) % mod
-  }
   return result
 }
 
@@ -201,13 +87,12 @@ function modPow(base, exp, mod) {
 export async function generateKeypair() {
   const kp = await subtle.generateKey(
     { name: 'ECDSA', namedCurve: 'P-256' },
-    true, // extractable to get JWK for compression
+    true,
     ['sign']
   )
   const jwk = await subtle.exportKey('jwk', kp.privateKey)
   const pubkey = compressFromJwk(jwk.x, jwk.y)
 
-  // Re-import as non-extractable for signing
   delete jwk.key_ops
   delete jwk.ext
   const privateKey = await subtle.importKey(
@@ -281,8 +166,7 @@ export async function verify(pubkeyB64url, signatureB64, item) {
       p1363Sig,
       encoded
     )
-  } catch (e) {
-    // Any crypto error → invalid signature
+  } catch {
     return false
   }
 }
