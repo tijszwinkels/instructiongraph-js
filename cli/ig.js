@@ -75,6 +75,7 @@ Commands:
   ig server                        Show current server
   ig server set <url>              Connect to a hub server
   ig server remove                 Disconnect (go offline)
+  ig server push                   Push all local objects to server
   ig realm                              Show current default realm
   ig realm set identity                 Go private (identity realm)
   ig realm set dataverse001             Go public
@@ -94,7 +95,7 @@ function commandUsage(command) {
     create: `Usage: ig create <spec.json>\n\nBuild, sign, and publish a spec to the configured store.`,
     auth: `Usage: ig auth\n\nAuthenticate with the configured hub.`,
     identity: `Usage: ig identity [generate|activate|list] [options]\n\nShow or manage the active identity.\n\nSubcommands:\n  ig identity generate [--name N] [--project] [--activate]\n  ig identity activate <name>\n  ig identity list\n\nEnvironment:\n  INSTRUCTIONGRAPH_DIR  Override config directory location`,
-    server: `Usage: ig server [set <url> | remove]\n\nShow, configure, or remove the hub server connection.\n\nSubcommands:\n  ig server              Show current server status\n  ig server set <url>    Connect to a hub server for sync\n  ig server remove       Disconnect and go offline\n\nWithout a server, all data stays on local filesystem only.\nWith a server, objects sync between local storage and the hub.`,
+    server: `Usage: ig server [set <url> | remove | push]\n\nShow, configure, or remove the hub server connection.\n\nSubcommands:\n  ig server              Show current server status\n  ig server set <url>    Connect to a hub server for sync\n  ig server remove       Disconnect and go offline\n  ig server push         Push all local objects to the server\n\nWithout a server, all data stays on local filesystem only.\nWith a server, objects sync between local storage and the hub.`,
     realm: `Usage: ig realm [set <realm|identity|dataverse001>]\n\nShow or set the default realm used for new objects.\n\n  ig realm set identity       Use current identity\'s realm (private)\n  ig realm set dataverse001   Use the public dataverse realm\n  ig realm set <pubkey>       Use any specific realm`
   }
 
@@ -454,6 +455,52 @@ function setServer() {
   console.log('')
   console.log('Public objects (realm: dataverse001) will be visible to everyone.')
   console.log('Private objects (identity realm) will only be accessible to you, after you authenticate with \'ig auth\'.')
+  console.log('')
+  console.log('If you have existing local objects, push them to the server:')
+  console.log('  ig server push')
+}
+
+async function serverPush() {
+  const configDir = findConfigDir()
+  const hubUrl = readConfig(configDir, 'hub-url', null)
+  if (!hubUrl) die('No server configured. Run \'ig server set <url>\' first.')
+
+  const dataDir = join(configDir, 'data')
+  if (!existsSync(dataDir)) die('No local data directory found.')
+
+  const local = createFsStore({ dataDir })
+  const hub = createHubStore({ url: hubUrl })
+  const sync = createSyncStore({ local, remote: hub })
+
+  // Authenticate if we have an identity (needed for private objects)
+  const identityConfig = resolveIdentityConfig(configDir)
+  if (identityConfig) {
+    try {
+      const { importPEM, createSigner } = await import('../src/identity.js')
+      const pem = readFileSync(identityConfig.path, 'utf-8')
+      const kp = await importPEM(pem)
+      const signer = createSigner(kp)
+      await hub.authenticate(signer)
+    } catch (e) {
+      console.warn(`Warning: could not authenticate (${e.message}). Private objects may fail to push.`)
+    }
+  }
+
+  console.log(`Pushing local objects to ${hubUrl}...`)
+
+  const result = await sync.pushAll({
+    onProgress({ ref, index, total, status, error }) {
+      const n = `[${index + 1}/${total}]`
+      if (status === 'ok') {
+        process.stderr.write(`${n} \x1b[32m✓\x1b[0m ${ref}\n`)
+      } else {
+        process.stderr.write(`${n} \x1b[31m✗\x1b[0m ${ref}: ${error}\n`)
+      }
+    }
+  })
+
+  console.log('')
+  console.log(`Done. ${result.pushed} pushed, ${result.errors} errors, ${result.total} total.`)
 }
 
 function removeServer() {
@@ -621,8 +668,10 @@ async function main() {
         setServer()
       } else if (subcmd === 'remove') {
         removeServer()
+      } else if (subcmd === 'push') {
+        await serverPush()
       } else {
-        die('Usage: ig server [set <url> | remove]')
+        die('Usage: ig server [set <url> | remove | push]')
       }
       break
     }

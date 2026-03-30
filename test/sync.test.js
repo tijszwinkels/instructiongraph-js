@@ -255,4 +255,77 @@ describe('sync store', () => {
       assert.ok(local.data['pk.2'], 'inbound result should be cached locally')
     })
   })
+
+  describe('pushAll: push all local objects to remote', () => {
+    it('pushes all local objects to hub', async () => {
+      const local = createMockStore({
+        'pk.1': makeObj('pk.1', 1),
+        'pk.2': makeObj('pk.2', 2),
+        'pk.3': makeObj('pk.3', 0)
+      })
+      const remote = createMockHubStore()
+      const sync = createSyncStore({ local, remote })
+
+      const result = await sync.pushAll()
+      assert.equal(result.total, 3)
+      assert.equal(result.pushed, 3)
+      assert.equal(result.errors, 0)
+      assert.ok(remote.data['pk.1'])
+      assert.ok(remote.data['pk.2'])
+      assert.ok(remote.data['pk.3'])
+    })
+
+    it('reports errors but continues pushing other objects', async () => {
+      const local = createMockStore({
+        'pk.1': makeObj('pk.1', 1),
+        'pk.2': makeObj('pk.2', 2)
+      })
+      let callCount = 0
+      const remote = {
+        ...createMockHubStore(),
+        async put(obj) {
+          callCount++
+          if (obj.item.ref === 'pk.1') throw new Error('server error')
+          return { ok: true }
+        }
+      }
+      const sync = createSyncStore({ local, remote })
+
+      const result = await sync.pushAll()
+      assert.equal(result.total, 2)
+      assert.equal(result.pushed, 1)
+      assert.equal(result.errors, 1)
+      assert.equal(callCount, 2, 'should attempt both')
+    })
+
+    it('calls onProgress for each object', async () => {
+      const local = createMockStore({
+        'pk.1': makeObj('pk.1', 1),
+        'pk.2': makeObj('pk.2', 2)
+      })
+      const remote = createMockHubStore()
+      const sync = createSyncStore({ local, remote })
+
+      const events = []
+      await sync.pushAll({ onProgress: (info) => events.push(info) })
+      assert.equal(events.length, 2)
+      for (const ev of events) {
+        assert.ok(ev.ref)
+        assert.ok(typeof ev.index === 'number')
+        assert.ok(typeof ev.total === 'number')
+        assert.ok(ev.status === 'ok' || ev.status === 'error')
+      }
+    })
+
+    it('returns zero counts when local is empty', async () => {
+      const local = createMockStore()
+      const remote = createMockHubStore()
+      const sync = createSyncStore({ local, remote })
+
+      const result = await sync.pushAll()
+      assert.equal(result.total, 0)
+      assert.equal(result.pushed, 0)
+      assert.equal(result.errors, 0)
+    })
+  })
 })
