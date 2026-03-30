@@ -98,7 +98,7 @@ function resolveIdentityConfig(configDir) {
 async function makeClient() {
   const configDir = findConfigDir()
   const hubUrl = readConfig(configDir, 'hub-url', 'https://dataverse001.net')
-  const defaultRealm = readConfig(configDir, 'default-realm', 'dataverse001')
+  const defaultRealm = readConfig(configDir, 'default-realm', null)  // null → pubkey realm (private by default)
 
   const hub = createHubStore({ url: hubUrl })
   let store = hub

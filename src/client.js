@@ -47,7 +47,9 @@ async function resolveIdentity(config) {
  */
 export function createClient(opts = {}) {
   const store = opts.store
-  const defaultRealm = opts.defaultRealm || 'dataverse001'
+  // No hardcoded default realm — buildItem defaults to pubkey (private).
+  // Pass defaultRealm or in: ['dataverse001'] explicitly for public objects.
+  const defaultRealm = opts.defaultRealm || null
 
   let identity = null // { pubkey, privateKey } or null
   let signer = null // { pubkey, sign } or null
@@ -195,7 +197,7 @@ export function createClient(opts = {}) {
         type: 'IDENTITY',
         instruction: 'Identity object for a dataverse participant. The pubkey field is the compressed raw EC point used to verify signatures. Display name from content.name.',
         content: { name },
-        in: [defaultRealm],
+        in: ['dataverse001'],  // Identity objects are always public
         relations: {
           root: [{ ref: ROOT_REF }],
           type_def: [{ ref: IDENTITY_TYPE_DEF }]

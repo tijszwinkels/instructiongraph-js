@@ -50,7 +50,7 @@ describe('client', () => {
       assert.ok(item.id)
       assert.ok(item.pubkey)
       assert.equal(item.type, 'TEST')
-      assert.deepEqual(item.in, ['dataverse001'])
+      assert.deepEqual(item.in, [ig.pubkey], 'default realm should be pubkey (private)')
     })
 
     it('sign creates valid envelope', async () => {

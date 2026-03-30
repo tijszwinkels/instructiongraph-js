@@ -47,7 +47,7 @@ describe('object', () => {
       assert.ok(item.created_at, 'should have created_at')
       assert.equal(item.type, 'POST')
       assert.deepEqual(item.content, { title: 'Hello' })
-      assert.deepEqual(item.in, ['dataverse001'])
+      assert.deepEqual(item.in, ['AxyU5_test'], 'default realm should be pubkey (private)')
     })
 
     it('respects custom realm', () => {
@@ -105,7 +105,7 @@ describe('object', () => {
         id: 'abc-123',
         pubkey: 'pk',
         ref: 'pk.abc-123',
-        in: ['dataverse001'],
+        in: ['pk'],
         created_at: '2026-01-01T00:00:00Z',
         revision: 3,
         type: 'POST',
@@ -116,7 +116,7 @@ describe('object', () => {
       assert.equal(ts.id, 'abc-123')
       assert.equal(ts.pubkey, 'pk')
       assert.equal(ts.ref, 'pk.abc-123')
-      assert.deepEqual(ts.in, ['dataverse001'])
+      assert.deepEqual(ts.in, ['pk'])
       assert.equal(ts.created_at, '2026-01-01T00:00:00Z')
       assert.equal(ts.revision, 4)
       assert.equal(ts.type, 'DELETED')

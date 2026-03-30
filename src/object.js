@@ -49,13 +49,13 @@ export function isoNow() {
  * @param {string} fields.type - e.g. 'POST', 'COMMENT'
  * @param {object} fields.content - free-form payload
  * @param {string} [fields.id] - explicit UUID (auto-generated if omitted)
- * @param {string[]} [fields.in] - realms (default: ['dataverse001'])
+ * @param {string[]} [fields.in] - realms (default: [pubkey] — private to owner)
  * @param {string} [fields.identityRef] - auto-adds author relation
  * @param {Object<string, import('./types.js').RelationEntry[]>} [fields.relations]
  * @param {string} [fields.name]
  * @param {string} [fields.instruction]
  * @param {object} [fields.rights]
- * @param {string} [fields.defaultRealm] - used if no `in` provided (default: 'dataverse001')
+ * @param {string} [fields.defaultRealm] - used if no `in` provided (default: pubkey realm)
  * @returns {import('./types.js').Item}
  */
 export function buildItem(fields) {
@@ -66,11 +66,13 @@ export function buildItem(fields) {
     identityRef,
     relations: providedRelations = {},
     name, instruction, rights,
-    defaultRealm = 'dataverse001'
+    defaultRealm,
   } = fields
 
   const ref = makeRef(pubkey, id)
-  const resolvedRealms = realms || [defaultRealm]
+  // Private by default: use pubkey as realm (only owner can read).
+  // Pass in: ['dataverse001'] explicitly to publish publicly.
+  const resolvedRealms = realms || [defaultRealm || pubkey]
 
   // Build relations: author first, then merge provided
   const relations = {}
