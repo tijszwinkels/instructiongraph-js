@@ -200,7 +200,7 @@ function listIdentityNames(configDir) {
 async function makeClient() {
   const configDir = findConfigDir()
   const hubUrl = readConfig(configDir, 'hub-url', null)  // null = no server configured
-  const defaultRealm = readConfig(configDir, 'default-realm', null)  // null → pubkey realm (private by default)
+  const defaultRealm = readConfig(configDir, 'default-realm', null)  // null → identity realm (private by default)
   const dataDir = join(configDir, 'data')
   const hasLocal = existsSync(dataDir)
 
@@ -339,20 +339,37 @@ async function showRealm() {
   const configuredRealm = readConfig(configDir, 'default-realm', null)
 
   if (configuredRealm) {
-    console.log(`Current realm: ${configuredRealm}`)
-    return
+    if (configuredRealm === 'dataverse001') {
+      console.log(`Current realm: dataverse001 (public)`)
+      console.log('New objects will be visible to everyone.')
+    } else {
+      console.log(`Current realm: ${configuredRealm}`)
+    }
+  } else {
+    // No explicit realm — check if we have an identity (identity realm default)
+    const identityConfig = resolveIdentityConfig(configDir)
+    if (identityConfig) {
+      const { importPEM } = await import('../src/identity.js')
+      const pem = readFileSync(identityConfig.path, 'utf-8')
+      const kp = await importPEM(pem)
+      console.log(`Current realm: ${kp.pubkey} (identity realm — private)`)
+      console.log('New objects will only be visible to you.')
+    } else {
+      console.log('Current realm: <no identity configured>')
+    }
   }
 
-  // No explicit realm — check if we have an identity (pubkey realm default)
-  const identityConfig = resolveIdentityConfig(configDir)
-  if (identityConfig) {
-    const { importPEM } = await import('../src/identity.js')
-    const pem = readFileSync(identityConfig.path, 'utf-8')
-    const kp = await importPEM(pem)
-    console.log(`Current realm: ${kp.pubkey} (pubkey realm default)`)
-  } else {
-    console.log('Current realm: <no identity configured>')
-  }
+  console.log('')
+  console.log('The realm controls who can see your objects:')
+  console.log('  dataverse001     Public — visible to everyone')
+  console.log('  <your pubkey>    Private — only visible to you (identity realm)')
+  console.log('')
+  console.log('When connected to a server, all objects are uploaded, but private')
+  console.log('objects are only accessible after you authenticate (ig auth).')
+  console.log('')
+  console.log('To switch:')
+  console.log('  ig realm set dataverse001        Go public')
+  console.log('  ig realm set <pubkey>            Go private')
 }
 
 function setRealm() {
@@ -360,7 +377,14 @@ function setRealm() {
   if (!realm) die('Usage: ig realm set <realm>')
   const configDir = findConfigDir()
   writeConfig(configDir, 'default-realm', realm)
-  console.log(`Set default realm: ${realm}`)
+
+  if (realm === 'dataverse001') {
+    console.log('Set default realm: dataverse001 (public)')
+    console.log('New objects will be visible to everyone.')
+  } else {
+    console.log(`Set default realm: ${realm}`)
+    console.log('New objects in this realm will only be visible to the realm owner.')
+  }
 }
 
 // ─── Server management ───────────────────────────────────────────
@@ -372,6 +396,11 @@ function showServer() {
   if (hubUrl) {
     console.log(`Server: ${hubUrl}`)
     console.log('Objects sync between local filesystem and the hub.')
+    console.log('')
+    console.log('Both public and private objects are uploaded to the server.')
+    console.log('Public objects (realm: dataverse001) are visible to everyone.')
+    console.log('Private objects (identity realm) are stored encrypted on the server')
+    console.log('and only accessible after you authenticate with \'ig auth\'.')
   } else {
     console.log('No server configured (offline mode).')
     console.log('Objects are stored on local filesystem only.')
@@ -380,10 +409,11 @@ function showServer() {
     console.log('  ig server set https://dataverse001.net')
     console.log('')
     console.log('What does connecting do?')
-    console.log('  \u2022 Your public objects become discoverable by others')
+    console.log('  \u2022 Your public objects (realm: dataverse001) become discoverable by others')
     console.log('  \u2022 You can discover and fetch objects created by others')
-    console.log('  \u2022 Local copies are kept \u2014 you keep working if the server goes down')
-    console.log('  \u2022 Private objects (in your pubkey realm) stay private on the hub too')
+    console.log('  \u2022 Local copies are always kept \u2014 you keep working if the server goes down')
+    console.log('  \u2022 Private objects (identity realm) are uploaded too, but only you can')
+    console.log('    access them after authenticating with \'ig auth\'')
   }
 }
 
@@ -397,6 +427,9 @@ function setServer() {
   writeConfig(configDir, 'hub-url', url)
   console.log(`Connected to ${url}`)
   console.log('Objects will now sync between local filesystem and the hub.')
+  console.log('')
+  console.log('Public objects (realm: dataverse001) will be visible to everyone.')
+  console.log('Private objects (identity realm) will only be accessible to you after \'ig auth\'.')
 }
 
 function removeServer() {

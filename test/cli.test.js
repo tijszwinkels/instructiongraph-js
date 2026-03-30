@@ -367,22 +367,24 @@ describe('CLI', () => {
   })
 
   describe('ig realm', () => {
-    it('shows pubkey realm by default when no default-realm config is set', async () => {
+    it('shows identity realm by default when no default-realm config is set', async () => {
       await rm(join(projectDir, '.instructionGraph', 'config', 'default-realm'), { force: true })
       const { stdout } = await ig('realm')
-      assert.match(stdout, /Current realm: .* \(pubkey realm default\)/)
-      assert.doesNotMatch(stdout, /^Current realm: dataverse001$/m)
+      assert.match(stdout, /identity realm.*private/i)
+      assert.match(stdout, /only visible to you/)
+      assert.match(stdout, /realm controls who can see/)
     })
 
     it('sets and shows the configured default realm', async () => {
       const { stdout: setOut } = await ig('realm', 'set', 'dataverse001')
-      assert.match(setOut, /Set default realm: dataverse001/)
+      assert.match(setOut, /dataverse001.*public/i)
 
       const configRealm = await readFile(join(projectDir, '.instructionGraph', 'config', 'default-realm'), 'utf-8')
       assert.equal(configRealm.trim(), 'dataverse001')
 
       const { stdout } = await ig('realm')
-      assert.match(stdout, /^Current realm: dataverse001$/m)
+      assert.match(stdout, /dataverse001.*public/i)
+      assert.match(stdout, /visible to everyone/)
     })
 
     it('uses configured default realm when signing new objects', async () => {
