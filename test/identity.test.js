@@ -9,6 +9,7 @@ import { join } from 'node:path'
 
 import { importCompressedPubkey, signItem, verifyBytes, verifyItemSignature } from '../src/crypto.js'
 import { createSigner, deriveKeypair, deriveSalt, importPEM } from '../src/identity.js'
+import { withShellLock } from '../test-support/shell-lock.js'
 
 const execFile = promisify(execFileCb)
 const VERIFY_SCRIPT = '/home/claude/projects/dataverse/.instructionGraph/verify'
@@ -54,7 +55,7 @@ test('importPEM supports PKCS#8 and SEC1 EC private keys', async () => {
   const dir = await mkdtemp(join(tmpdir(), 'ig-identity-'))
   const file = join(dir, 'signed.json')
   await writeFile(file, JSON.stringify(signed), 'utf8')
-  const { stdout } = await execFile(VERIFY_SCRIPT, [file])
+  const { stdout } = await withShellLock(() => execFile(VERIFY_SCRIPT, [file]))
   assert.match(stdout, /Verified OK/)
 })
 

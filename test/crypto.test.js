@@ -13,6 +13,7 @@ import {
   signItem,
   verifyItemSignature,
 } from '../src/crypto.js'
+import { withShellLock } from '../test-support/shell-lock.js'
 
 const execFile = promisify(execFileCb)
 const VERIFY_SCRIPT = '/home/claude/projects/dataverse/.instructionGraph/verify'
@@ -70,7 +71,7 @@ test('JS signatures verify with existing shell script', async () => {
   const file = join(dir, 'signed.json')
   await writeFile(file, JSON.stringify(signed), 'utf8')
 
-  const { stdout } = await execFile(VERIFY_SCRIPT, [file])
+  const { stdout } = await withShellLock(() => execFile(VERIFY_SCRIPT, [file]))
   assert.match(stdout, /Verified OK/)
 })
 
