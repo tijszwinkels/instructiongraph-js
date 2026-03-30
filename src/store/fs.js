@@ -1,12 +1,57 @@
 /**
  * Filesystem store — local storage matching shell script conventions.
- * Files: {pubkey}.{id}.json, canonical JSON, mtime set to object timestamp.
+ * Files: {pubkey}.{id}.json, canonical JSON + trailing newline, mtime set to object timestamp.
  * Backups: bk/{pubkey}.{id}.r{revision}.json
+ *
+ * Verifies signatures on put (rejects tampered objects).
+ * Supports cursor-based pagination for search/inbound.
  */
 
 import { readFileSync, writeFileSync, existsSync, mkdirSync, readdirSync, renameSync, utimesSync, unlinkSync } from 'node:fs'
 import { join } from 'node:path'
 import { canonicalJSON } from '../canonical.js'
+import { verify } from '../crypto.js'
+
+// ─── Cursor helpers ──────────────────────────────────────────────
+
+function objectTimestamp(obj) {
+  return new Date(obj.item.updated_at || obj.item.created_at || 0).getTime()
+}
+
+/** Encode a cursor from the last item in a page. */
+function encodeCursor(obj) {
+  return Buffer.from(JSON.stringify({
+    t: new Date(objectTimestamp(obj)).toISOString(),
+    ref: obj.item.ref
+  })).toString('base64url')
+}
+
+/** Decode a cursor string → { t, ref } or null. */
+function decodeCursor(cursor) {
+  if (!cursor) return null
+  try {
+    return JSON.parse(Buffer.from(cursor, 'base64url').toString())
+  } catch {
+    return null
+  }
+}
+
+/** Skip items until we pass the cursor position. */
+function applyCursor(items, cursor) {
+  if (!cursor) return items
+  const cursorTime = new Date(cursor.t).getTime()
+  if (isNaN(cursorTime)) return items
+
+  let i = 0
+  while (i < items.length) {
+    const t = objectTimestamp(items[i])
+    if (t < cursorTime || (t === cursorTime && items[i].item.ref < cursor.ref)) break
+    i++
+  }
+  return items.slice(i)
+}
+
+// ─── Store ───────────────────────────────────────────────────────
 
 /**
  * Create a filesystem store.
@@ -45,6 +90,32 @@ export function createFsStore({ dataDir }) {
     renameSync(src, dst)
   }
 
+  /** Read and filter all envelopes, sorted newest-first. */
+  function listAll() {
+    const items = []
+    try {
+      const files = readdirSync(dataDir).filter(f => f.endsWith('.json'))
+      for (const f of files) {
+        const obj = readObj(join(dataDir, f))
+        if (obj?.item) items.push(obj)
+      }
+    } catch { /* empty dir */ }
+    items.sort((a, b) => objectTimestamp(b) - objectTimestamp(a))
+    return items
+  }
+
+  /** Paginate a sorted array of items. */
+  function paginate(items, query) {
+    const page = applyCursor(items, decodeCursor(query.cursor))
+    const limit = query.limit || 50
+    const sliced = page.slice(0, limit)
+    const hasMore = page.length > limit
+    return {
+      items: sliced,
+      cursor: hasMore && sliced.length > 0 ? encodeCursor(sliced[sliced.length - 1]) : null
+    }
+  }
+
   return {
     async get(ref) {
       return readObj(filePath(ref))
@@ -52,7 +123,17 @@ export function createFsStore({ dataDir }) {
 
     async put(signedObj) {
       const item = signedObj.item
-      const ref = item.ref || `${item.pubkey}.${item.id}`
+      if (!item?.ref || !item?.pubkey || !item?.id) {
+        return { ok: false, error: 'missing item.ref, item.pubkey, or item.id' }
+      }
+
+      // Verify signature before storing
+      const valid = await verify(item.pubkey, signedObj.signature, item)
+      if (!valid) {
+        return { ok: false, error: 'signature verification failed' }
+      }
+
+      const ref = item.ref
       const fp = filePath(ref)
 
       // Check existing revision
@@ -83,62 +164,36 @@ export function createFsStore({ dataDir }) {
         }
       }
 
-      // Write canonical JSON
-      writeFileSync(fp, canonicalJSON(signedObj))
+      // Write canonical JSON with trailing newline (matches shell store)
+      writeFileSync(fp, canonicalJSON(signedObj) + '\n')
       setMtime(fp, item)
       return { ok: true }
     },
 
     async search(query = {}) {
-      const items = []
-      try {
-        const files = readdirSync(dataDir).filter(f => f.endsWith('.json'))
-        for (const f of files) {
-          const obj = readObj(join(dataDir, f))
-          if (!obj?.item) continue
-          if (query.type && obj.item.type !== query.type) continue
-          if (query.by && obj.item.pubkey !== query.by) continue
-          items.push(obj)
-        }
-      } catch { /* empty dir is fine */ }
-
-      // Sort newest first
-      items.sort((a, b) => {
-        const ta = new Date(b.item.updated_at || b.item.created_at || 0).getTime()
-        const tb = new Date(a.item.updated_at || a.item.created_at || 0).getTime()
-        return ta - tb
+      const all = listAll()
+      const filtered = all.filter(obj => {
+        if (query.type && obj.item.type !== query.type) return false
+        if (query.by && obj.item.pubkey !== query.by) return false
+        return true
       })
-
-      const limit = query.limit || items.length
-      return { items: items.slice(0, limit), cursor: null }
+      return paginate(filtered, query)
     },
 
     async inbound(ref, opts = {}) {
-      // Scan all files for objects referencing this ref in their relations
-      const items = []
-      try {
-        const files = readdirSync(dataDir).filter(f => f.endsWith('.json'))
-        for (const f of files) {
-          const raw = readFileSync(join(dataDir, f), 'utf-8')
-          if (!raw.includes(ref)) continue // fast pre-filter
-          const obj = JSON.parse(raw)
-          if (!obj?.item?.relations) continue
+      const all = listAll()
+      const filtered = all.filter(obj => {
+        if (!obj.item?.relations) return false
+        if (opts.type && obj.item.type !== opts.type) return false
+        if (opts.from && obj.item.pubkey !== opts.from) return false
 
-          // Check if any relation points to ref
-          for (const [relName, entries] of Object.entries(obj.item.relations)) {
-            if (opts.relation && relName !== opts.relation) continue
-            if (Array.isArray(entries) && entries.some(e => e.ref === ref)) {
-              if (opts.type && obj.item.type !== opts.type) continue
-              if (opts.from && obj.item.pubkey !== opts.from) continue
-              items.push(obj)
-              break
-            }
-          }
+        for (const [relName, entries] of Object.entries(obj.item.relations)) {
+          if (opts.relation && relName !== opts.relation) continue
+          if (Array.isArray(entries) && entries.some(e => e.ref === ref)) return true
         }
-      } catch { /* empty dir */ }
-
-      const limit = opts.limit || items.length
-      return { items: items.slice(0, limit), cursor: null }
+        return false
+      })
+      return paginate(filtered, opts)
     }
   }
 }

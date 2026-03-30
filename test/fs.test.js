@@ -31,7 +31,7 @@ describe('fs store', () => {
       ...overrides
     })
     const signature = await sign(kp.privateKey, item)
-    return { is: 'instructionGraph001', signature, item }
+    return { is: 'instructionGraph001', signature, item, _kp: kp }
   }
 
   it('put + get round-trip', async () => {
@@ -45,7 +45,7 @@ describe('fs store', () => {
     assert.equal(fetched.item.type, 'TEST')
   })
 
-  it('stores as canonical JSON with correct filename', async () => {
+  it('stores as canonical JSON with trailing newline', async () => {
     const obj = await makeSignedObj()
     await store.put(obj)
 
@@ -53,7 +53,7 @@ describe('fs store', () => {
     assert.ok(existsSync(filepath), 'file should exist')
 
     const raw = readFileSync(filepath, 'utf-8')
-    assert.equal(raw, canonicalJSON(obj), 'should be canonical JSON')
+    assert.equal(raw, canonicalJSON(obj) + '\n', 'should be canonical JSON + newline')
   })
 
   it('sets mtime to object timestamp', async () => {
@@ -63,7 +63,6 @@ describe('fs store', () => {
     const filepath = join(dataDir, `${obj.item.ref}.json`)
     const stat = statSync(filepath)
     const expectedTime = new Date(obj.item.updated_at || obj.item.created_at).getTime()
-    // Allow 1 second tolerance for filesystem precision
     assert.ok(
       Math.abs(stat.mtimeMs - expectedTime) < 1000,
       `mtime should match object timestamp (diff: ${Math.abs(stat.mtimeMs - expectedTime)}ms)`
@@ -73,6 +72,14 @@ describe('fs store', () => {
   it('get returns null for missing object', async () => {
     const result = await store.get('nonexistent.00000000-0000-0000-0000-000000000000')
     assert.equal(result, null)
+  })
+
+  it('rejects tampered signatures', async () => {
+    const obj = await makeSignedObj()
+    obj.item.content.title = 'tampered'
+    const result = await store.put(obj)
+    assert.ok(!result.ok, 'should reject tampered object')
+    assert.equal(result.error, 'signature verification failed')
   })
 
   it('backs up old revisions', async () => {
@@ -143,5 +150,48 @@ describe('fs store', () => {
     const result = await store.search({ by: obj1.item.pubkey })
     assert.equal(result.items.length, 1)
     assert.equal(result.items[0].item.pubkey, obj1.item.pubkey)
+  })
+
+  it('search supports cursor-based pagination', async () => {
+    // Create 3 objects with distinct timestamps
+    const kp = await generateKeypair()
+    const ids = ['aaa', 'bbb', 'ccc']
+    for (let i = 0; i < 3; i++) {
+      const item = buildItem({ pubkey: kp.pubkey, type: 'TEST', content: { i } , id: ids[i] })
+      item.created_at = `2026-03-0${i + 1}T00:00:00Z`
+      const sig = await sign(kp.privateKey, item)
+      await store.put({ is: 'instructionGraph001', signature: sig, item })
+    }
+
+    const page1 = await store.search({ type: 'TEST', limit: 2 })
+    assert.equal(page1.items.length, 2)
+    assert.ok(page1.cursor, 'should have a cursor for next page')
+
+    const page2 = await store.search({ type: 'TEST', limit: 2, cursor: page1.cursor })
+    assert.equal(page2.items.length, 1)
+    assert.equal(page2.cursor, null, 'no more pages')
+
+    // All 3 items should be seen across both pages (no duplicates)
+    const allRefs = [...page1.items, ...page2.items].map(i => i.item.ref)
+    assert.equal(new Set(allRefs).size, 3)
+  })
+
+  it('inbound finds objects referencing a target', async () => {
+    const kp = await generateKeypair()
+    const target = buildItem({ pubkey: kp.pubkey, type: 'POST', content: { title: 'Target' }, id: 'target-id' })
+    const sigT = await sign(kp.privateKey, target)
+    await store.put({ is: 'instructionGraph001', signature: sigT, item: target })
+
+    const comment = buildItem({
+      pubkey: kp.pubkey, type: 'COMMENT',
+      content: { text: 'hi' }, id: 'comment-id',
+      relations: { replies_to: [{ ref: target.ref }] }
+    })
+    const sigC = await sign(kp.privateKey, comment)
+    await store.put({ is: 'instructionGraph001', signature: sigC, item: comment })
+
+    const result = await store.inbound(target.ref, { relation: 'replies_to' })
+    assert.equal(result.items.length, 1)
+    assert.equal(result.items[0].item.id, 'comment-id')
   })
 })
