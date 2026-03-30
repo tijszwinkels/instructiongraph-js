@@ -219,6 +219,19 @@ describe('CLI', () => {
     })
   })
 
+  describe('ig identity list', () => {
+    it('lists identities and marks the active one', async () => {
+      await ig('identity', 'generate', '--name', 'list-a')
+      await ig('identity', 'generate', '--name', 'list-b')
+      await ig('identity', 'activate', 'list-b')
+
+      const { stdout } = await ig('identity', 'list')
+      assert.match(stdout, /^\s*default$/m)
+      assert.match(stdout, /^\s*list-a$/m)
+      assert.match(stdout, /^\* list-b$/m)
+    })
+  })
+
   describe('ig realm', () => {
     it('shows pubkey realm by default when no default-realm config is set', async () => {
       await rm(join(projectDir, '.instructionGraph', 'config', 'default-realm'), { force: true })

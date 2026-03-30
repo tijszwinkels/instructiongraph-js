@@ -14,7 +14,7 @@
  *   ig identity               Show current identity
  */
 
-import { readFileSync, writeFileSync, existsSync, mkdirSync } from 'node:fs'
+import { readFileSync, writeFileSync, existsSync, mkdirSync, readdirSync } from 'node:fs'
 import { resolve, join } from 'node:path'
 import { canonicalJSON } from '../src/canonical.js'
 import { verify } from '../src/crypto.js'
@@ -54,6 +54,7 @@ Commands:
   ig identity generate [--name N]  Generate a new identity
                        [--activate] Set as active identity
   ig identity activate <name>      Activate an existing identity
+  ig identity list                 List available identities
   ig realm                         Show current default realm
   ig realm set <realm>             Set default realm`)
   process.exit(0)
@@ -113,6 +114,22 @@ function resolveIdentityPemPath(configDir, identityName) {
   if (configDir) candidates.push(join(configDir, 'identities', identityName, 'private.pem'))
   candidates.push(join(process.env.HOME || '~', '.instructionGraph', 'identities', identityName, 'private.pem'))
   return candidates.find(existsSync) || null
+}
+
+function listIdentityNames(configDir) {
+  const dirs = []
+  if (configDir) dirs.push(join(configDir, 'identities'))
+  dirs.push(join(process.env.HOME || '~', '.instructionGraph', 'identities'))
+
+  const names = new Set()
+  for (const dir of dirs) {
+    if (!existsSync(dir)) continue
+    for (const entry of readdirSync(dir, { withFileTypes: true })) {
+      if (!entry.isDirectory()) continue
+      if (existsSync(join(dir, entry.name, 'private.pem'))) names.add(entry.name)
+    }
+  }
+  return [...names].sort()
 }
 
 async function makeClient() {
@@ -186,6 +203,21 @@ function identityActivate() {
   writeConfig(configDir, 'active-identity', name)
   console.log(`Activated identity: ${name}`)
   console.log(`PEM: ${pemPath}`)
+}
+
+function identityList() {
+  const configDir = findConfigDir()
+  const activeName = readConfig(configDir, 'active-identity', 'default')
+  const names = listIdentityNames(configDir)
+
+  if (names.length === 0) {
+    console.log('No identities found')
+    return
+  }
+
+  for (const name of names) {
+    console.log(name === activeName ? `* ${name}` : `  ${name}`)
+  }
 }
 
 async function showRealm() {
@@ -315,6 +347,8 @@ async function main() {
         await identityGenerate()
       } else if (subcmd === 'activate') {
         identityActivate()
+      } else if (subcmd === 'list') {
+        identityList()
       } else {
         const configDir = findConfigDir()
         const identityConfig = resolveIdentityConfig(configDir)
