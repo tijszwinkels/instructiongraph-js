@@ -1,0 +1,222 @@
+import { describe, it, before, after } from 'node:test'
+import assert from 'node:assert/strict'
+import http from 'node:http'
+import { createHubStore } from '../src/store/hub.js'
+import { canonicalJSON } from '../src/canonical.js'
+
+// ─── Helper: create a local HTTP server ──────────────────────────
+
+function createMockHub(handler) {
+  const server = http.createServer(async (req, res) => {
+    try {
+      await handler(req, res, new URL(req.url, 'http://127.0.0.1'))
+    } catch (e) {
+      res.writeHead(500, { 'Content-Type': 'application/json' })
+      res.end(JSON.stringify({ error: e.message }))
+    }
+  })
+  return new Promise((resolve, reject) => {
+    server.listen(0, '127.0.0.1', () => {
+      const { port } = server.address()
+      resolve({
+        url: `http://127.0.0.1:${port}`,
+        async close() { await new Promise(r => server.close(r)) }
+      })
+    })
+    server.on('error', reject)
+  })
+}
+
+async function readBody(req) {
+  const chunks = []
+  for await (const chunk of req) chunks.push(chunk)
+  return Buffer.concat(chunks).toString('utf-8')
+}
+
+// ─── Fixture ─────────────────────────────────────────────────────
+
+const FIXTURE = {
+  is: 'instructionGraph001',
+  signature: 'test-sig',
+  item: {
+    id: 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa',
+    pubkey: 'AxyU5_5vWmP2tO_klN4UpbZzRsuJEvJTrdwdg_gODxZJ',
+    ref: 'AxyU5_5vWmP2tO_klN4UpbZzRsuJEvJTrdwdg_gODxZJ.aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa',
+    in: ['dataverse001'],
+    created_at: '2026-03-30T00:00:00Z',
+    type: 'TEST',
+    relations: {},
+    content: { hello: 'world' }
+  }
+}
+
+// ─── Tests ───────────────────────────────────────────────────────
+
+describe('hub store (mock server)', () => {
+  let hub
+  const requests = []
+
+  before(async () => {
+    hub = await createMockHub(async (req, res, url) => {
+      const body = await readBody(req)
+      requests.push({
+        method: req.method,
+        path: url.pathname,
+        search: url.search,
+        auth: req.headers.authorization,
+        body
+      })
+
+      // GET object
+      if (req.method === 'GET' && url.pathname === `/${FIXTURE.item.ref}`) {
+        res.writeHead(200, { 'Content-Type': 'application/json' })
+        return res.end(JSON.stringify(FIXTURE))
+      }
+
+      // GET 404
+      if (req.method === 'GET' && url.pathname === '/missing') {
+        res.writeHead(404, { 'Content-Type': 'application/json' })
+        return res.end(JSON.stringify({ error: 'not found' }))
+      }
+
+      // PUT
+      if (req.method === 'PUT' && url.pathname === `/${FIXTURE.item.ref}`) {
+        res.writeHead(201, { 'Content-Type': 'application/json' })
+        return res.end(JSON.stringify(FIXTURE))
+      }
+
+      // Search
+      if (req.method === 'GET' && url.pathname === '/search') {
+        res.writeHead(200, { 'Content-Type': 'application/json' })
+        return res.end(JSON.stringify({ items: [FIXTURE], cursor: 'next', has_more: true }))
+      }
+
+      // Inbound
+      if (req.method === 'GET' && url.pathname.endsWith('/inbound')) {
+        res.writeHead(200, { 'Content-Type': 'application/json' })
+        return res.end(JSON.stringify({ items: [FIXTURE], cursor: null }))
+      }
+
+      // Auth challenge
+      if (req.method === 'GET' && url.pathname === '/auth/challenge') {
+        res.writeHead(200, { 'Content-Type': 'application/json' })
+        return res.end(JSON.stringify({ challenge: 'test-challenge-123', expires_at: '2026-03-30T00:05:00Z' }))
+      }
+
+      // Auth token
+      if (req.method === 'POST' && url.pathname === '/auth/token') {
+        res.writeHead(200, { 'Content-Type': 'application/json' })
+        return res.end(JSON.stringify({ token: 'granted-token', pubkey: 'pk', expires_at: '2026-04-01T00:00:00Z' }))
+      }
+
+      // Auth logout
+      if (req.method === 'POST' && url.pathname === '/auth/logout') {
+        res.writeHead(200, { 'Content-Type': 'application/json' })
+        return res.end(JSON.stringify({ ok: true }))
+      }
+
+      res.writeHead(404)
+      res.end('{}')
+    })
+  })
+
+  after(async () => { await hub.close() })
+
+  it('get() fetches known object', async () => {
+    const store = createHubStore({ url: hub.url })
+    const obj = await store.get(FIXTURE.item.ref)
+    assert.deepEqual(obj, FIXTURE)
+  })
+
+  it('get() returns null for 404', async () => {
+    const store = createHubStore({ url: hub.url })
+    assert.equal(await store.get('missing'), null)
+  })
+
+  it('put() sends canonical JSON with auth header', async () => {
+    requests.length = 0
+    const store = createHubStore({ url: hub.url, token: 'my-token' })
+    const result = await store.put(FIXTURE)
+    assert.ok(result.ok)
+    assert.equal(result.status, 201)
+
+    const putReq = requests.find(r => r.method === 'PUT')
+    assert.equal(putReq.body, canonicalJSON(FIXTURE))
+    assert.equal(putReq.auth, 'Bearer my-token')
+  })
+
+  it('search() passes query params', async () => {
+    requests.length = 0
+    const store = createHubStore({ url: hub.url })
+    const result = await store.search({
+      by: 'pk', type: 'TEST', limit: 5, cursor: 'c1', includeInboundCounts: true
+    })
+    assert.equal(result.items.length, 1)
+    assert.equal(result.cursor, 'next')
+
+    const searchReq = requests.find(r => r.path === '/search')
+    assert.ok(searchReq.search.includes('by=pk'))
+    assert.ok(searchReq.search.includes('type=TEST'))
+    assert.ok(searchReq.search.includes('limit=5'))
+    assert.ok(searchReq.search.includes('include=inbound_counts'))
+  })
+
+  it('inbound() passes query params', async () => {
+    const store = createHubStore({ url: hub.url })
+    const result = await store.inbound(FIXTURE.item.ref, {
+      relation: 'author', type: 'COMMENT', limit: 3
+    })
+    assert.equal(result.items.length, 1)
+  })
+
+  it('authenticate() does challenge-response and sets token', async () => {
+    requests.length = 0
+    const store = createHubStore({ url: hub.url })
+    const signedPayloads = []
+    const mockSigner = {
+      pubkey: 'test-pk',
+      async sign(data) {
+        signedPayloads.push(new TextDecoder().decode(data))
+        return 'mock-sig'
+      }
+    }
+
+    const result = await store.authenticate(mockSigner)
+    assert.equal(result.token, 'granted-token')
+    assert.deepEqual(signedPayloads, ['test-challenge-123'])
+
+    // Token should now be set — next request should include it
+    requests.length = 0
+    await store.get(FIXTURE.item.ref)
+    assert.equal(requests[0].auth, 'Bearer granted-token')
+  })
+
+  it('logout() clears the token', async () => {
+    const store = createHubStore({ url: hub.url, token: 'initial-token' })
+    await store.logout()
+
+    requests.length = 0
+    await store.get(FIXTURE.item.ref)
+    assert.equal(requests[0].auth, undefined)
+  })
+
+  it('handles unreachable server gracefully', async () => {
+    const store = createHubStore({ url: 'http://127.0.0.1:1' }) // nothing on port 1
+    assert.equal(await store.get('any.ref'), null)
+    const putResult = await store.put(FIXTURE)
+    assert.ok(!putResult.ok)
+    const searchResult = await store.search({ type: 'TEST' })
+    assert.deepEqual(searchResult, { items: [], cursor: null })
+  })
+})
+
+describe('hub store (live smoke test)', () => {
+  const store = createHubStore({ url: 'https://dataverse001.net' })
+  const ROOT_REF = 'AxyU5_5vWmP2tO_klN4UpbZzRsuJEvJTrdwdg_gODxZJ.00000000-0000-0000-0000-000000000000'
+
+  it('reads the root node from the live hub', async () => {
+    const obj = await store.get(ROOT_REF)
+    assert.ok(obj)
+    assert.equal(obj.item.type, 'ROOT')
+  })
+})
