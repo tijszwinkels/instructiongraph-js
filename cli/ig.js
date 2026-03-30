@@ -316,9 +316,12 @@ async function main() {
       } else if (subcmd === 'activate') {
         identityActivate()
       } else {
+        const configDir = findConfigDir()
+        const identityConfig = resolveIdentityConfig(configDir)
         const { client } = await makeClient()
         await client.ready
         if (client.pubkey) {
+          if (identityConfig?.name) console.log(`Identity: ${identityConfig.name}`)
           console.log(`Pubkey: ${client.pubkey}`)
         } else {
           console.log('No identity configured')

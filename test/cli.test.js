@@ -145,8 +145,9 @@ describe('CLI', () => {
     assert.ok(stdout.includes('POST'))
   })
 
-  it('ig identity: shows current pubkey', async () => {
+  it('ig identity: shows current identity name and pubkey', async () => {
     const { stdout } = await ig('identity')
+    assert.match(stdout, /Identity: default/)
     assert.match(stdout, /Pubkey:/)
   })
 
