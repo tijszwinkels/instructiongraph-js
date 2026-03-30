@@ -1,0 +1,18 @@
+{
+  "name": "@instructiongraph/ig",
+  "version": "0.1.0",
+  "type": "module",
+  "exports": {
+    ".": "./src/index.js",
+    "./store/hub": "./src/store/hub.js",
+    "./store/fs": "./src/store/fs.js",
+    "./store/sync": "./src/store/sync.js"
+  },
+  "main": "./src/index.js",
+  "bin": {
+    "ig": "./cli/ig.js"
+  },
+  "engines": {
+    "node": ">=18"
+  }
+}
