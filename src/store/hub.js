@@ -1,6 +1,7 @@
 /**
  * Hub store — HTTP-based storage backend for instructionGraph hubs.
  * Owns its own authentication state (challenge-response → bearer token).
+ * Supports ETag-based conditional requests (revision-based, matching hub server).
  */
 
 import { canonicalJSON } from '../canonical.js'
@@ -35,9 +36,21 @@ export function createHubStore({ url, token = null }) {
     /** @returns {string} */
     getUrl() { return baseUrl },
 
-    async get(ref) {
+    /**
+     * Get an object from the hub.
+     * @param {string} ref
+     * @param {object} [opts]
+     * @param {number} [opts.localRevision] - If set, sends If-None-Match ETag.
+     *   Returns { _notModified: true } on 304.
+     */
+    async get(ref, opts = {}) {
       try {
-        const res = await fetch(`${baseUrl}/${ref}`, { headers: headers() })
+        const h = headers()
+        if (opts.localRevision != null) {
+          h['If-None-Match'] = `"${opts.localRevision}"`
+        }
+        const res = await fetch(`${baseUrl}/${ref}`, { headers: h })
+        if (res.status === 304) return { _notModified: true }
         if (res.status === 404) return null
         if (!res.ok) {
           console.warn(`[hub] GET /${ref} failed: ${res.status}`)

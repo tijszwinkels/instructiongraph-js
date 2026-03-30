@@ -67,9 +67,14 @@ describe('hub store (mock server)', () => {
         body
       })
 
-      // GET object
+      // GET object (with ETag support)
       if (req.method === 'GET' && url.pathname === `/${FIXTURE.item.ref}`) {
-        res.writeHead(200, { 'Content-Type': 'application/json' })
+        const etag = `"${FIXTURE.item.revision || 0}"`
+        if (req.headers['if-none-match'] === etag) {
+          res.writeHead(304)
+          return res.end()
+        }
+        res.writeHead(200, { 'Content-Type': 'application/json', 'ETag': etag })
         return res.end(JSON.stringify(FIXTURE))
       }
 
@@ -207,6 +212,30 @@ describe('hub store (mock server)', () => {
     assert.ok(!putResult.ok)
     const searchResult = await store.search({ type: 'TEST' })
     assert.deepEqual(searchResult, { items: [], cursor: null })
+  })
+
+  it('get() with localRevision sends If-None-Match and returns _notModified on 304', async () => {
+    requests.length = 0
+    const store = createHubStore({ url: hub.url })
+    const result = await store.get(FIXTURE.item.ref, { localRevision: FIXTURE.item.revision || 0 })
+    assert.deepEqual(result, { _notModified: true })
+    const getReq = requests.find(r => r.method === 'GET' && r.path === `/${FIXTURE.item.ref}`)
+    assert.ok(getReq, 'should have made a GET request')
+  })
+
+  it('get() with wrong localRevision returns full object', async () => {
+    const store = createHubStore({ url: hub.url })
+    const result = await store.get(FIXTURE.item.ref, { localRevision: 999 })
+    assert.deepEqual(result, FIXTURE)
+  })
+
+  it('get() without localRevision returns full object (no If-None-Match)', async () => {
+    requests.length = 0
+    const store = createHubStore({ url: hub.url })
+    const result = await store.get(FIXTURE.item.ref)
+    assert.deepEqual(result, FIXTURE)
+    const getReq = requests.find(r => r.method === 'GET')
+    assert.equal(getReq.search, '', 'should not have query params')
   })
 })
 
