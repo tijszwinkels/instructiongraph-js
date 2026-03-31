@@ -62,8 +62,8 @@ Usage:
 
 Commands:
   ig get <ref>                     Fetch object
-  ig search [--type T] [--by PK]   Search objects
-  ig inbound <ref> [--relation R]  Inbound relations
+  ig search [options]              Search objects
+  ig inbound <ref> [options]       Inbound relations
   ig verify <file.json>            Verify signature
   ig sign <spec.json>              Sign spec, print envelope
   ig create <spec.json>            Sign and publish
@@ -91,8 +91,8 @@ Run 'ig <command> --help' for command-specific help.`)
 function commandUsage(command) {
   const docs = {
     get: `Usage: ig get <ref>\n\nFetch an object by ref and print its JSON envelope.`,
-    search: `Usage: ig search [--type T] [--by PK] [--limit N]\n\nSearch objects on the configured hub/store.`,
-    inbound: `Usage: ig inbound <ref> [--relation R] [--type T] [--limit N]\n\nList objects that point to the target ref.`,
+    search: `Usage: ig search [--type T] [--by PK] [--limit N] [--cursor C] [--counts] [--json]\n\nSearch objects on the configured hub/store.\n\nFlags:\n  --type T     Filter by object type\n  --by PK      Filter by pubkey\n  --limit N    Max results (default: 20)\n  --cursor C   Pagination cursor from previous result\n  --counts     Include inbound relation counts\n  --json       Output raw JSON array`,
+    inbound: `Usage: ig inbound <ref> [--relation R] [--type T] [--from PK] [--limit N] [--cursor C] [--counts] [--json]\n\nList objects that point to the target ref.\n\nFlags:\n  --relation R  Filter by relation name\n  --type T      Filter by source object type\n  --from PK     Filter by source object pubkey\n  --limit N     Max results (default: 20)\n  --cursor C    Pagination cursor from previous result\n  --counts      Include inbound relation counts\n  --json        Output raw JSON array`,
     verify: `Usage: ig verify <file.json>\n\nVerify an instructionGraph001 envelope on disk.`,
     sign: `Usage: ig sign <spec.json>\n\nBuild and sign a spec, then print the canonical envelope JSON.`,
     create: `Usage: ig create <spec.json>\n\nBuild, sign, and publish a spec to the configured store.`,
@@ -682,13 +682,24 @@ async function main() {
       const result = await ctx.client.search({
         type: flag('type'),
         by: flag('by'),
-        limit: flag('limit') ? parseInt(flag('limit')) : 20
+        limit: flag('limit') ? parseInt(flag('limit')) : 20,
+        cursor: flag('cursor'),
+        includeInboundCounts: args.includes('--counts')
       })
-      for (const item of result.items) {
-        const i = item.item
-        console.log(`${i.ref}  ${i.type || '?'}  ${i.name || i.content?.title || '(no name)'}`)
+      if (args.includes('--json')) {
+        for (const item of result.items) console.log(canonicalJSON(item))
+      } else {
+        for (const item of result.items) {
+          const i = item.item
+          let line = `${i.ref}  ${i.type || '?'}  ${i.name || i.content?.title || '(no name)'}`
+          if (item._inbound_counts) {
+            const counts = Object.entries(item._inbound_counts).map(([k, v]) => `${k}:${v}`).join(' ')
+            line += `  [${counts}]`
+          }
+          console.log(line)
+        }
       }
-      if (result.cursor) console.log(`\n... more results (cursor: ${result.cursor})`)
+      if (result.cursor) console.log(`\n... more results (--cursor ${result.cursor})`)
       break
     }
 
@@ -700,12 +711,25 @@ async function main() {
       const result = await ctx.client.inbound(ref, {
         relation: flag('relation'),
         type: flag('type'),
-        limit: flag('limit') ? parseInt(flag('limit')) : 20
+        from: flag('from'),
+        limit: flag('limit') ? parseInt(flag('limit')) : 20,
+        cursor: flag('cursor'),
+        includeInboundCounts: args.includes('--counts')
       })
-      for (const item of result.items) {
-        const i = item.item
-        console.log(`${i.ref}  ${i.type || '?'}  ${i.name || i.content?.title || ''}`)
+      if (args.includes('--json')) {
+        for (const item of result.items) console.log(canonicalJSON(item))
+      } else {
+        for (const item of result.items) {
+          const i = item.item
+          let line = `${i.ref}  ${i.type || '?'}  ${i.name || i.content?.title || ''}`
+          if (item._inbound_counts) {
+            const counts = Object.entries(item._inbound_counts).map(([k, v]) => `${k}:${v}`).join(' ')
+            line += `  [${counts}]`
+          }
+          console.log(line)
+        }
       }
+      if (result.cursor) console.log(`\n... more results (--cursor ${result.cursor})`)
       break
     }
 
