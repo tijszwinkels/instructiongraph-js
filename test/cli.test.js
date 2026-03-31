@@ -191,6 +191,74 @@ describe('CLI', () => {
     )
   })
 
+  it('ig create: fails when object with same id already exists', async () => {
+    // First create
+    const specPath = join(projectDir, 'dup-spec.json')
+    const fixedId = '11111111-1111-1111-1111-111111111111'
+    await writeFile(specPath, JSON.stringify({ type: 'NOTE', id: fixedId, in: ['dataverse001'], content: { text: 'first' } }))
+    await ig('create', specPath)
+
+    // Second create with same id should fail
+    await writeFile(specPath, JSON.stringify({ type: 'NOTE', id: fixedId, in: ['dataverse001'], content: { text: 'second' } }))
+    await assert.rejects(
+      ig('create', specPath),
+      err => err.stderr.includes('already exists') && err.stderr.includes('--update')
+    )
+  })
+
+  it('ig create --update: updates existing object with incremented revision', async () => {
+    const specPath = join(projectDir, 'upd-spec.json')
+    const fixedId = '22222222-2222-2222-2222-222222222222'
+
+    // Create original
+    await writeFile(specPath, JSON.stringify({ type: 'NOTE', id: fixedId, in: ['dataverse001'], content: { text: 'v1' } }))
+    const { stdout: out1 } = await ig('create', specPath)
+    const ref = out1.trim()
+    const orig = stored.get(ref)
+    assert.equal(orig.item.content.text, 'v1')
+    assert.ok(!orig.item.revision || orig.item.revision === 0, 'original has no revision')
+
+    // Update
+    await writeFile(specPath, JSON.stringify({ type: 'NOTE', id: fixedId, in: ['dataverse001'], content: { text: 'v2' } }))
+    const { stdout: out2 } = await ig('create', specPath, '--update')
+    assert.equal(out2.trim(), ref, 'ref should be the same')
+
+    const updated = stored.get(ref)
+    assert.equal(updated.item.content.text, 'v2')
+    assert.equal(updated.item.revision, 1, 'revision should be incremented')
+    assert.ok(updated.item.updated_at, 'should have updated_at')
+    assert.equal(updated.item.created_at, orig.item.created_at, 'created_at preserved')
+    assert.ok(await verify(updated.item.pubkey, updated.signature, updated.item), 'valid signature')
+  })
+
+  it('ig create --update: respects explicit revision in spec', async () => {
+    const specPath = join(projectDir, 'upd-rev-spec.json')
+    const fixedId = '33333333-3333-3333-3333-333333333333'
+
+    // Create original
+    await writeFile(specPath, JSON.stringify({ type: 'NOTE', id: fixedId, in: ['dataverse001'], content: { text: 'v1' } }))
+    await ig('create', specPath)
+
+    // Update with explicit revision
+    await writeFile(specPath, JSON.stringify({ type: 'NOTE', id: fixedId, in: ['dataverse001'], revision: 42, content: { text: 'v42' } }))
+    const { stdout } = await ig('create', specPath, '--update')
+    const ref = stdout.trim()
+    const obj = stored.get(ref)
+    assert.equal(obj.item.revision, 42, 'should use explicit revision')
+  })
+
+  it('ig create --update: creates normally when object does not exist', async () => {
+    const specPath = join(projectDir, 'upd-new-spec.json')
+    const fixedId = '44444444-4444-4444-4444-444444444444'
+    await writeFile(specPath, JSON.stringify({ type: 'NOTE', id: fixedId, in: ['dataverse001'], content: { text: 'brand new' } }))
+
+    const { stdout } = await ig('create', specPath, '--update')
+    const ref = stdout.trim()
+    const obj = stored.get(ref)
+    assert.equal(obj.item.content.text, 'brand new')
+    assert.ok(!obj.item.revision, 'new object should have no revision')
+  })
+
   it('ig get: fetches from hub', async () => {
     // Use the object created above
     const ref = [...stored.keys()][0]

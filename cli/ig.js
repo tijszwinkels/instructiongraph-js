@@ -96,7 +96,7 @@ function commandUsage(command) {
     inbound: `Usage: ig inbound <ref> [--relation R] [--type T] [--from PK] [--limit N] [--cursor C] [--counts] [--json]\n\nList objects that point to the target ref.\n\nFlags:\n  --relation R  Filter by relation name\n  --type T      Filter by source object type\n  --from PK     Filter by source object pubkey\n  --limit N     Max results (default: 20)\n  --cursor C    Pagination cursor from previous result\n  --counts      Include inbound relation counts\n  --json        Output raw JSON array`,
     verify: `Usage: ig verify <file.json>\n\nVerify an instructionGraph001 envelope on disk.`,
     sign: `Usage: ig sign <spec.json>\n\nBuild and sign a spec, then print the canonical envelope JSON.`,
-    create: `Usage: ig create <spec.json> [--identity N] [--realm R] [--push] [--no-push]\n\nBuild, sign, and publish a spec to the configured store.\n\nFlags:\n  --identity N  Sign with identity N instead of active identity\n  --realm R     Override default realm (e.g. dataverse001, identity)\n  --push        Push to server (auto-login if needed for identity realm)\n  --no-push     Store locally only, skip server push`,
+    create: `Usage: ig create <spec.json> [--update] [--identity N] [--realm R] [--push] [--no-push]\n\nBuild, sign, and publish a spec to the configured store.\n\nFlags:\n  --update      Allow updating existing objects (auto-increments revision,\n                sets updated_at). Without this, fails if object exists.\n  --identity N  Sign with identity N instead of active identity\n  --realm R     Override default realm (e.g. dataverse001, identity)\n  --push        Push to server (auto-login if needed for identity realm)\n  --no-push     Store locally only, skip server push`,
 
     identity: `Usage: ig identity [generate|activate|list] [options]\n\nShow or manage the active identity.\n\nSubcommands:\n  ig identity generate [--name N] [--project] [--activate]\n  ig identity activate <name>\n  ig identity list\n\nEnvironment:\n  INSTRUCTIONGRAPH_DIR  Override config directory location`,
     server: `Usage: ig server [set <url> | login | logout | remove | push]\n\nShow, configure, or remove the hub server connection.\n\nSubcommands:\n  ig server              Show current server status and auth\n  ig server set <url>    Connect to a hub server for sync\n  ig server login        Log in with your active identity\n  ig server logout       Log out from the hub\n  ig server remove       Disconnect and go offline\n  ig server push [--all]  Push local objects (default: your realms only)\n\nWithout a server, all data stays on local filesystem only.\nWith a server, objects sync between local storage and the hub.\nLogin uses your active identity (see ig identity).`,
@@ -920,6 +920,7 @@ async function main() {
       const realm = flag('realm')
       const noPush = args.includes('--no-push')
       const forcePush = args.includes('--push')
+      const allowUpdate = args.includes('--update')
 
       if (forcePush && noPush) die('Cannot use both --push and --no-push')
 
@@ -927,19 +928,18 @@ async function main() {
       printStatus(ctx)
 
       const spec = JSON.parse(readFileSync(resolve(file), 'utf-8'))
-      const item = ctx.client.build(spec)
 
-      // Validate: can't push someone else's identity realm
-      const itemRealms = item.in || []
+      // Pre-check: can't target someone else's identity realm
+      const specRealms = spec.in || []
       const signerPubkey = ctx.client.pubkey
-      const foreignIdentityRealm = itemRealms.find(r => r !== 'dataverse001' && r.length === 44 && r !== signerPubkey)
+      const foreignIdentityRealm = specRealms.find(r => r !== 'dataverse001' && r.length === 44 && r !== signerPubkey)
       if (foreignIdentityRealm) {
         die(`Cannot create in identity realm ${foreignIdentityRealm} \u2014 it belongs to a different pubkey.\n` +
             `Your pubkey: ${signerPubkey}`)
       }
 
       // If --push with identity realm and not logged in, auto-authenticate
-      const hasIdentityRealm = itemRealms.some(r => r !== 'dataverse001' && r.length === 44)
+      const hasIdentityRealm = specRealms.some(r => r !== 'dataverse001' && r.length === 44)
       if (forcePush && hasIdentityRealm && ctx.isOnline) {
         const savedToken = readConfig(ctx.configDir, 'auth-token', null)
         if (!savedToken) {
@@ -958,26 +958,42 @@ async function main() {
         die('Cannot push \u2014 no server configured. Run \'ig server set <url>\' first.')
       }
 
-      // Sign and publish
-      await ctx.client.validateType(item)
-      const signed = await ctx.client.sign(item)
-
       if (noPush) {
-        // Local only: use fs store directly or fall back to whatever store we have
-        const { createFsStore: makeFsStore } = await import('../src/store/fs.js')
-        const dataDir = join(ctx.configDir, 'data')
-        const local = makeFsStore({ dataDir })
-        await local.put(signed)
-        console.log('Stored locally (server push skipped)')
-      } else {
-        // Normal path: sync store handles local + remote
-        const result = await ctx.client.publish(signed)
-        if (!result.ok) {
-          die(`Publish failed: ${result.error || `status ${result.status}`}`)
+        // Local only: build + sign manually, store to fs directly
+        const item = ctx.client.build(spec)
+        if (allowUpdate && spec.id) {
+          // Check for existing and handle update locally
+          const { createFsStore: makeFsStore } = await import('../src/store/fs.js')
+          const dataDir = join(ctx.configDir, 'data')
+          const local = makeFsStore({ dataDir })
+          let existing = null
+          try { existing = await local.get(item.ref) } catch { /* not found */ }
+          if (existing?.item) {
+            if (existing.item.pubkey !== signerPubkey) die('Can only update your own objects')
+            item.created_at = existing.item.created_at
+            item.revision = spec.revision ?? (existing.item.revision || 0) + 1
+            item.updated_at = spec.updated_at ?? new Date().toISOString().replace(/\.\d{3}Z$/, 'Z')
+          }
+          await ctx.client.validateType(item)
+          const signed = await ctx.client.sign(item)
+          await local.put(signed)
+          console.log('Stored locally (server push skipped)')
+          console.log(signed.item.ref)
+        } else {
+          await ctx.client.validateType(item)
+          const signed = await ctx.client.sign(item)
+          const { createFsStore: makeFsStore } = await import('../src/store/fs.js')
+          const dataDir = join(ctx.configDir, 'data')
+          const local = makeFsStore({ dataDir })
+          await local.put(signed)
+          console.log('Stored locally (server push skipped)')
+          console.log(signed.item.ref)
         }
+      } else {
+        // Normal path: client.create handles existence check + update logic
+        const ref = await ctx.client.create(spec, { allowUpdate })
+        console.log(ref)
       }
-
-      console.log(signed.item.ref)
       break
     }
 

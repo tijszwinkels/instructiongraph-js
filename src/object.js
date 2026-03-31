@@ -56,6 +56,9 @@ export function isoNow() {
  * @param {string} [fields.instruction]
  * @param {object} [fields.rights]
  * @param {string} [fields.defaultRealm] - used if no `in` provided (default: pubkey realm)
+ * @param {string} [fields.created_at] - explicit created_at (default: now)
+ * @param {string} [fields.updated_at] - explicit updated_at
+ * @param {number} [fields.revision] - explicit revision
  * @returns {import('./types.js').Item}
  */
 export function buildItem(fields) {
@@ -67,6 +70,9 @@ export function buildItem(fields) {
     relations: providedRelations = {},
     name, instruction, rights,
     defaultRealm,
+    created_at,
+    updated_at,
+    revision,
   } = fields
 
   const ref = makeRef(pubkey, id)
@@ -89,7 +95,7 @@ export function buildItem(fields) {
     pubkey,
     ref,
     in: resolvedRealms,
-    created_at: isoNow(),
+    created_at: created_at || isoNow(),
     type,
     relations,
     content
@@ -98,6 +104,8 @@ export function buildItem(fields) {
   if (name !== undefined) item.name = name
   if (instruction !== undefined) item.instruction = instruction
   if (rights !== undefined) item.rights = rights
+  if (updated_at !== undefined) item.updated_at = updated_at
+  if (revision !== undefined) item.revision = revision
 
   return item
 }
