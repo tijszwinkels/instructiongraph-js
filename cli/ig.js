@@ -53,7 +53,9 @@ instructions plus relations, so agents and humans can follow the graph to
 understand, render, and extend it.
 
 Learn more:
-  https://dataverse001.net/AxyU5_5vWmP2tO_klN4UpbZzRsuJEvJTrdwdg_gODxZJ.b3f5a7c9-2d4e-4f60-9b8a-0c1d2e3f4a5b
+  Readme:      https://github.com/tijszwinkels/instructiongraph-js#readme
+  Tutorial:    https://github.com/tijszwinkels/instructiongraph-js/blob/main/TUTORIAL.md
+  Data format: https://dataverse001.net/AxyU5_5vWmP2tO_klN4UpbZzRsuJEvJTrdwdg_gODxZJ.b3f5a7c9-2d4e-4f60-9b8a-0c1d2e3f4a5b
 
 Usage:
   ig <command> [options]
