@@ -101,7 +101,16 @@ export function createSyncStore({ local, remote }) {
 
       // Remote: non-fatal
       try {
-        await remote.put(signedObj)
+        const remoteResult = await remote.put(signedObj)
+        if (remoteResult && !remoteResult.ok && remoteResult.status === 403) {
+          const realms = signedObj.item?.in || []
+          const hasIdentityRealm = realms.some(r => r !== 'dataverse001')
+          if (hasIdentityRealm) {
+            console.warn(`[sync] Server rejected private object (not authenticated). Run 'ig server login' to push private objects.`)
+          } else {
+            console.warn(`[sync] Server rejected object (403).`)
+          }
+        }
       } catch (e) {
         console.warn(`[sync] remote put failed (non-fatal): ${e.message}`)
       }
