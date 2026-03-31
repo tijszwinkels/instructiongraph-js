@@ -175,11 +175,12 @@ export function createSyncStore({ local, remote }) {
      * Push all local objects to the remote hub.
      * Skips identity-realm objects when not authenticated.
      * @param {object} [opts]
+     * @param {string[]} [opts.realms] - Only push objects belonging to at least one of these realms. If omitted, push all (subject to auth gating).
      * @param {(info: {ref: string, index: number, total: number, status: 'ok'|'error'|'skipped', error?: string}) => void} [opts.onProgress]
      * @returns {Promise<{total: number, pushed: number, skipped: number, errors: number}>}
      */
     async pushAll(opts = {}) {
-      const { onProgress } = opts
+      const { onProgress, realms } = opts
       const allLocal = await local.search({ limit: 100000 })
       const items = allLocal.items || []
       const total = items.length
@@ -187,10 +188,22 @@ export function createSyncStore({ local, remote }) {
       let skipped = 0
       let errors = 0
 
+      const realmSet = realms ? new Set(realms) : null
+
       for (let i = 0; i < items.length; i++) {
         const obj = items[i]
         const ref = obj.item?.ref
         if (!ref) continue
+
+        // Filter by realm if specified
+        if (realmSet) {
+          const objRealms = obj.item?.in || []
+          if (!objRealms.some(r => realmSet.has(r))) {
+            skipped++
+            if (onProgress) onProgress({ ref, index: i, total, status: 'skipped' })
+            continue
+          }
+        }
 
         if (!shouldPushToRemote(obj)) {
           skipped++

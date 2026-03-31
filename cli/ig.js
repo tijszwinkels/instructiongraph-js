@@ -77,7 +77,7 @@ Commands:
   ig server set <url>              Connect to a hub server
   ig server login                  Log in with your active identity
   ig server logout                 Log out
-  ig server push                   Push all local objects to server
+  ig server push [--all]            Push local objects to server
   ig server remove                 Disconnect (go offline)
   ig realm                              Show current default realm
   ig realm set identity                 Go private (identity realm)
@@ -98,7 +98,7 @@ function commandUsage(command) {
     create: `Usage: ig create <spec.json>\n\nBuild, sign, and publish a spec to the configured store.`,
 
     identity: `Usage: ig identity [generate|activate|list] [options]\n\nShow or manage the active identity.\n\nSubcommands:\n  ig identity generate [--name N] [--project] [--activate]\n  ig identity activate <name>\n  ig identity list\n\nEnvironment:\n  INSTRUCTIONGRAPH_DIR  Override config directory location`,
-    server: `Usage: ig server [set <url> | login | logout | remove | push]\n\nShow, configure, or remove the hub server connection.\n\nSubcommands:\n  ig server              Show current server status and auth\n  ig server set <url>    Connect to a hub server for sync\n  ig server login        Log in with your active identity\n  ig server logout       Log out from the hub\n  ig server remove       Disconnect and go offline\n  ig server push         Push all local objects to the server\n\nWithout a server, all data stays on local filesystem only.\nWith a server, objects sync between local storage and the hub.\nLogin uses your active identity (see ig identity).`,
+    server: `Usage: ig server [set <url> | login | logout | remove | push]\n\nShow, configure, or remove the hub server connection.\n\nSubcommands:\n  ig server              Show current server status and auth\n  ig server set <url>    Connect to a hub server for sync\n  ig server login        Log in with your active identity\n  ig server logout       Log out from the hub\n  ig server remove       Disconnect and go offline\n  ig server push [--all]  Push local objects (default: your realms only)\n\nWithout a server, all data stays on local filesystem only.\nWith a server, objects sync between local storage and the hub.\nLogin uses your active identity (see ig identity).`,
     realm: `Usage: ig realm [set <realm|identity|dataverse001>]\n\nShow or set the default realm used for new objects.\n\n  ig realm set identity       Use current identity\'s realm (private)\n  ig realm set dataverse001   Use the public dataverse realm\n  ig realm set <pubkey>       Use any specific realm`
   }
 
@@ -510,6 +510,7 @@ function setServer() {
 }
 
 async function serverPush() {
+  const pushAll = args.includes('--all')
   const configDir = findConfigDir()
   const hubUrl = readConfig(configDir, 'hub-url', null)
   if (!hubUrl) die('No server configured. Run \'ig server set <url>\' first.')
@@ -521,29 +522,46 @@ async function serverPush() {
   const hub = createHubStore({ url: hubUrl })
   const sync = createSyncStore({ local, remote: hub })
 
-  // Authenticate if we have an identity (needed for private objects)
-  const identityConfig = resolveIdentityConfig(configDir)
-  if (identityConfig) {
-    try {
-      const { importPEM, createSigner } = await import('../src/identity.js')
-      const pem = readFileSync(identityConfig.path, 'utf-8')
-      const kp = await importPEM(pem)
-      const signer = createSigner(kp)
-      await hub.authenticate(signer)
-    } catch (e) {
-      console.warn(`Warning: could not authenticate (${e.message}). Private objects may fail to push.`)
+  // Authenticate if we have a saved token (needed for private objects)
+  const savedToken = readConfig(configDir, 'auth-token', null)
+  if (savedToken) {
+    hub.setToken(savedToken)
+  }
+
+  // Determine which realms to push
+  let realms = null  // null = all realms (--all)
+  let pubkey = null
+  if (!pushAll) {
+    realms = ['dataverse001']
+    const identityConfig = resolveIdentityConfig(configDir)
+    if (identityConfig) {
+      try {
+        const { importPEM } = await import('../src/identity.js')
+        const pem = readFileSync(identityConfig.path, 'utf-8')
+        const kp = await importPEM(pem)
+        pubkey = kp.pubkey
+        realms.push(pubkey)
+      } catch { /* ignore — push public only */ }
+    }
+    console.log(`Pushing objects in realms: ${realms.join(', ')}...`)
+    if (!savedToken && pubkey) {
+      console.log('(Not logged in — private objects will be skipped. Run \'ig server login\' first.)')
+    }
+  } else {
+    console.log(`Pushing all local objects to ${hubUrl}...`)
+    if (!savedToken) {
+      console.log('(Not logged in — private objects will be skipped. Run \'ig server login\' first.)')
     }
   }
 
-  console.log(`Pushing local objects to ${hubUrl}...`)
-
   const result = await sync.pushAll({
+    realms,
     onProgress({ ref, index, total, status, error }) {
       const n = `[${index + 1}/${total}]`
       if (status === 'ok') {
         process.stderr.write(`${n} \x1b[32m✓\x1b[0m ${ref}\n`)
       } else if (status === 'skipped') {
-        process.stderr.write(`${n} \x1b[33m⊘\x1b[0m ${ref} (private, skipped)\n`)
+        process.stderr.write(`${n} \x1b[33m⊘\x1b[0m ${ref} (skipped)\n`)
       } else {
         process.stderr.write(`${n} \x1b[31m✗\x1b[0m ${ref}: ${error}\n`)
       }
@@ -552,7 +570,7 @@ async function serverPush() {
 
   console.log('')
   const parts = [`${result.pushed} pushed`]
-  if (result.skipped) parts.push(`${result.skipped} skipped (private, not logged in)`)
+  if (result.skipped) parts.push(`${result.skipped} skipped`)
   if (result.errors) parts.push(`${result.errors} errors`)
   parts.push(`${result.total} total`)
   console.log(`Done. ${parts.join(', ')}.`)
@@ -585,6 +603,9 @@ async function serverLogin() {
   if (result.ok) {
     writeConfig(ctx.configDir, 'auth-token', result.token)
     console.log(`Logged in as ${result.pubkey}`)
+    console.log('')
+    console.log('Private objects that were local-only can now sync with the server.')
+    console.log('Run \'ig server push\' to upload them.')
   } else {
     die('Login failed')
   }

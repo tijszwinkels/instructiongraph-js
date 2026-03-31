@@ -327,6 +327,41 @@ describe('sync store', () => {
       assert.equal(result.pushed, 0)
       assert.equal(result.errors, 0)
     })
+
+    it('filters by realms when specified', async () => {
+      const local = createMockStore({
+        'pk.1': makeObj('pk.1', 1, ['dataverse001']),
+        'pk.2': makeObj('pk.2', 1, ['mypubkey']),
+        'pk.3': makeObj('pk.3', 1, ['dataverse001', 'mypubkey']),
+        'pk.4': makeObj('pk.4', 1, ['other-realm'])
+      })
+      const remote = createMockHubStore()
+      remote.getToken = () => 'valid-token'  // authenticated
+      const sync = createSyncStore({ local, remote })
+
+      const result = await sync.pushAll({ realms: ['dataverse001', 'mypubkey'] })
+      assert.equal(result.pushed, 3, 'pk.1, pk.2, pk.3 match')
+      assert.equal(result.skipped, 1, 'pk.4 does not match')
+      assert.ok(remote.data['pk.1'])
+      assert.ok(remote.data['pk.2'])
+      assert.ok(remote.data['pk.3'])
+      assert.ok(!remote.data['pk.4'])
+    })
+
+    it('realm filter combines with auth gating', async () => {
+      const local = createMockStore({
+        'pk.1': makeObj('pk.1', 1, ['dataverse001']),
+        'pk.2': makeObj('pk.2', 1, ['mypubkey']),
+        'pk.3': makeObj('pk.3', 1, ['other-realm'])
+      })
+      const remote = createMockHubStore()
+      // not authenticated
+      const sync = createSyncStore({ local, remote })
+
+      const result = await sync.pushAll({ realms: ['dataverse001', 'mypubkey'] })
+      assert.equal(result.pushed, 1, 'only public pk.1 pushed')
+      assert.equal(result.skipped, 2, 'pk.2 auth-gated, pk.3 realm-filtered')
+    })
   })
 
   describe('identity-realm gating: skip remote push when not authenticated', () => {
