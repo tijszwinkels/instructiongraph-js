@@ -135,10 +135,13 @@ function readConfig(configDir, name, defaultVal) {
   if (existsSync(localPath)) return readFileSync(localPath, 'utf-8').trim()
 
   // Fall back to home config if configDir is project-local
-  const home = homeConfigDir()
-  if (configDir !== home) {
-    const homePath = join(home, 'config', name)
-    if (existsSync(homePath)) return readFileSync(homePath, 'utf-8').trim()
+  // Skip fallback when INSTRUCTIONGRAPH_DIR is set (fully self-contained)
+  if (!process.env.INSTRUCTIONGRAPH_DIR) {
+    const home = homeConfigDir()
+    if (configDir !== home) {
+      const homePath = join(home, 'config', name)
+      if (existsSync(homePath)) return readFileSync(homePath, 'utf-8').trim()
+    }
   }
   return defaultVal
 }
@@ -147,10 +150,13 @@ function resolveIdentityConfig(configDir) {
   const identityName = readConfig(configDir, 'active-identity', 'default')
 
   // Check configDir first, then home (if different)
+  // Skip fallback when INSTRUCTIONGRAPH_DIR is set (fully self-contained)
   const candidates = [join(configDir, 'identities', identityName, 'private.pem')]
-  const home = homeConfigDir()
-  if (configDir !== home) {
-    candidates.push(join(home, 'identities', identityName, 'private.pem'))
+  if (!process.env.INSTRUCTIONGRAPH_DIR) {
+    const home = homeConfigDir()
+    if (configDir !== home) {
+      candidates.push(join(home, 'identities', identityName, 'private.pem'))
+    }
   }
 
   for (const pemPath of candidates) {
@@ -169,9 +175,11 @@ function writeConfig(configDir, name, value) {
 
 function resolveIdentityPemPath(configDir, identityName) {
   const candidates = [join(configDir, 'identities', identityName, 'private.pem')]
-  const home = homeConfigDir()
-  if (configDir !== home) {
-    candidates.push(join(home, 'identities', identityName, 'private.pem'))
+  if (!process.env.INSTRUCTIONGRAPH_DIR) {
+    const home = homeConfigDir()
+    if (configDir !== home) {
+      candidates.push(join(home, 'identities', identityName, 'private.pem'))
+    }
   }
   return candidates.find(existsSync) || null
 }
@@ -190,8 +198,10 @@ function listLocalIdentityNames(configDir) {
 
 function listIdentityNames(configDir) {
   const dirs = [join(configDir, 'identities')]
-  const home = homeConfigDir()
-  if (configDir !== home) dirs.push(join(home, 'identities'))
+  if (!process.env.INSTRUCTIONGRAPH_DIR) {
+    const home = homeConfigDir()
+    if (configDir !== home) dirs.push(join(home, 'identities'))
+  }
 
   const names = new Set()
   for (const dir of dirs) {
