@@ -1,58 +1,98 @@
 /**
- * Sync store — combines local + remote, keeps newer revision.
- * Port of transport-hub-read semantics.
+ * Sync store — combines local (fs) + remote (hub), follows hub proxy semantics.
+ *
+ * GET:  Hub first (with ETag from local revision). On 304, serve local.
+ *       On 200, cache locally. On 404, serve local + push to hub.
+ *       On hub error, fall back to local.
+ *
+ * PUT:  Write local first, then push to hub (non-fatal).
+ *
+ * SEARCH/INBOUND: Query both, merge results (dedup by ref, higher revision wins).
+ *                 Cache all hub results locally.
  */
 
 /**
- * Create a sync store that reads/writes to both local and remote.
- *
- * On get: fetches from both, keeps higher revision, syncs the other direction.
- * On put: writes to local first, then pushes to remote (non-fatal if remote fails).
+ * Create a sync store that mirrors hub proxy behavior.
  *
  * @param {object} opts
- * @param {import('../types.js').Store} opts.local
- * @param {import('../types.js').Store} opts.remote
+ * @param {import('../types.js').Store} opts.local  - filesystem store
+ * @param {import('../types.js').Store} opts.remote - hub store (must support get(ref, {localRevision}))
  * @returns {import('../types.js').Store}
  */
 export function createSyncStore({ local, remote }) {
+
+  /** Cache a single object locally (fire-and-forget, won't downgrade). */
+  function cacheLocally(obj) {
+    if (!obj?.item?.ref) return
+    local.put(obj).catch(e => console.warn(`[sync] local cache failed: ${e.message}`))
+  }
+
+  /** Push a single object to hub (fire-and-forget). */
+  function pushToRemote(obj) {
+    if (!obj?.item?.ref) return
+    remote.put(obj).catch(e => console.warn(`[sync] remote push failed: ${e.message}`))
+  }
+
+  /** Cache an array of objects locally (background, best-effort). */
+  function cacheItemsLocally(items) {
+    for (const obj of items) {
+      if (obj?.item?.ref) cacheLocally(obj)
+    }
+  }
+
   return {
     async get(ref) {
-      // Fetch from both in parallel
-      const [localObj, remoteObj] = await Promise.all([
-        local.get(ref).catch(() => null),
-        remote.get(ref).catch(() => null)
-      ])
+      // Get local revision for ETag
+      let localObj = null
+      try { localObj = await local.get(ref) } catch { /* ok */ }
+      const localRev = localObj?.item?.revision
 
-      if (!localObj && !remoteObj) return null
-
-      if (!localObj) {
-        // Remote only → sync to local
-        local.put(remoteObj).catch(e => console.warn(`[sync] local put failed: ${e.message}`))
-        return remoteObj
-      }
-
-      if (!remoteObj) {
-        // Local only → sync to remote
-        remote.put(localObj).catch(e => console.warn(`[sync] remote put failed: ${e.message}`))
+      // Ask hub with ETag (conditional request)
+      let remoteResult = null
+      try {
+        remoteResult = await remote.get(ref, { localRevision: localRev })
+      } catch {
+        // Hub unreachable — fall back to local
         return localObj
       }
 
-      // Both exist → compare revisions
-      const localRev = localObj.item?.revision || 0
-      const remoteRev = remoteObj.item?.revision || 0
-
-      if (remoteRev > localRev) {
-        local.put(remoteObj).catch(e => console.warn(`[sync] local put failed: ${e.message}`))
-        return remoteObj
-      }
-
-      if (localRev > remoteRev) {
-        remote.put(localObj).catch(e => console.warn(`[sync] remote put failed: ${e.message}`))
+      // 304 Not Modified — local is current
+      if (remoteResult?._notModified) {
         return localObj
       }
 
-      // Same revision → prefer local (already have it)
-      return localObj
+      // Hub returned an object
+      if (remoteResult?.item) {
+        const remoteRev = remoteResult.item.revision || 0
+
+        if (localObj) {
+          const lRev = localObj.item?.revision || 0
+          if (remoteRev > lRev) {
+            // Hub is newer — cache locally
+            cacheLocally(remoteResult)
+            return remoteResult
+          }
+          if (lRev > remoteRev) {
+            // Local is newer — push to hub
+            pushToRemote(localObj)
+            return localObj
+          }
+          // Same revision — prefer local (already have it)
+          return localObj
+        }
+
+        // Hub only — cache locally
+        cacheLocally(remoteResult)
+        return remoteResult
+      }
+
+      // Hub returned null (404) — serve local if we have it, and push
+      if (localObj) {
+        pushToRemote(localObj)
+        return localObj
+      }
+
+      return null
     },
 
     async put(signedObj) {
@@ -70,14 +110,20 @@ export function createSyncStore({ local, remote }) {
     },
 
     async search(query = {}) {
-      // Merge results from both, deduplicate by ref, prefer higher revision
+      // Query both in parallel
       const [localResult, remoteResult] = await Promise.all([
         local.search(query).catch(() => ({ items: [], cursor: null })),
         remote.search(query).catch(() => ({ items: [], cursor: null }))
       ])
 
+      // Cache hub results locally (background)
+      if (remoteResult.items.length > 0) {
+        cacheItemsLocally(remoteResult.items)
+      }
+
+      // Merge: dedup by ref, prefer higher revision
       const byRef = new Map()
-      for (const item of [...localResult.items, ...remoteResult.items]) {
+      for (const item of [...remoteResult.items, ...localResult.items]) {
         const ref = item.item?.ref
         if (!ref) continue
         const existing = byRef.get(ref)
@@ -92,15 +138,85 @@ export function createSyncStore({ local, remote }) {
       }
     },
 
+    /**
+     * Push all local objects to the remote hub.
+     * @param {object} [opts]
+     * @param {(info: {ref: string, index: number, total: number, status: 'ok'|'error', error?: string}) => void} [opts.onProgress]
+     * @returns {Promise<{total: number, pushed: number, errors: number}>}
+     */
+    async pushAll(opts = {}) {
+      const { onProgress } = opts
+      const localResult = await local.search({ limit: 100000 })
+      const items = localResult.items || []
+      let pushed = 0
+      let errors = 0
+
+      for (let i = 0; i < items.length; i++) {
+        const obj = items[i]
+        const ref = obj.item?.ref
+        if (!ref) continue
+
+        try {
+          await remote.put(obj)
+          pushed++
+          if (onProgress) onProgress({ ref, index: i, total: items.length, status: 'ok' })
+        } catch (e) {
+          errors++
+          if (onProgress) onProgress({ ref, index: i, total: items.length, status: 'error', error: e.message })
+        }
+      }
+
+      return { total: items.length, pushed, errors }
+    },
+
+    /**
+     * Push all local objects to the remote hub.
+     * @param {object} [opts]
+     * @param {(progress: {ref: string, index: number, total: number, status: 'ok'|'error'}) => void} [opts.onProgress]
+     * @returns {Promise<{total: number, pushed: number, errors: number}>}
+     */
+    async pushAll(opts = {}) {
+      const { onProgress } = opts
+      const allLocal = await local.search({ limit: 100000 })
+      const items = allLocal.items || []
+      const total = items.length
+      let pushed = 0
+      let errors = 0
+
+      for (let i = 0; i < items.length; i++) {
+        const obj = items[i]
+        const ref = obj.item?.ref
+        if (!ref) continue
+        let status = 'ok'
+        try {
+          await remote.put(obj)
+          pushed++
+        } catch (e) {
+          errors++
+          status = 'error'
+          console.warn(`[sync] pushAll failed for ${ref}: ${e.message}`)
+        }
+        if (onProgress) onProgress({ ref, index: i, total, status })
+      }
+
+      return { total, pushed, errors }
+    },
+
     async inbound(ref, opts = {}) {
-      // Prefer remote for inbound (hub has more data), but merge local
+      // Query both in parallel
       const [localResult, remoteResult] = await Promise.all([
         local.inbound(ref, opts).catch(() => ({ items: [], cursor: null })),
         remote.inbound(ref, opts).catch(() => ({ items: [], cursor: null }))
       ])
 
+      // Cache hub results locally (background)
+      if (remoteResult.items.length > 0) {
+        cacheItemsLocally(remoteResult.items)
+      }
+
+      // Merge: dedup by ref, prefer higher revision
       const byRef = new Map()
-      for (const item of [...localResult.items, ...remoteResult.items]) {
+      for (const item of [...remoteResult.items, ...localResult.items]) {
         const itemRef = item.item?.ref
         if (!itemRef) continue
         const existing = byRef.get(itemRef)
