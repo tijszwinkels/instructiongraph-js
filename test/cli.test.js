@@ -178,6 +178,18 @@ describe('CLI', () => {
     }
   })
 
+  it('ig status: shows full configuration status', async () => {
+    const { stdout } = await ig('status')
+    assert.match(stdout, /Storage/)
+    assert.match(stdout, /Identities/)
+    assert.match(stdout, /Default Realm/)
+    assert.match(stdout, /Server/)
+    // Should show our test identity as active
+    assert.match(stdout, /default/)
+    // Should show hub URL
+    assert.match(stdout, /127\.0\.0\.1/)
+  })
+
   it('ig identity: shows current identity name and pubkey', async () => {
     const { stdout } = await ig('identity')
     assert.match(stdout, /Identity: default/)
