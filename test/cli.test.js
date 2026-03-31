@@ -167,8 +167,8 @@ describe('CLI', () => {
       ['verify'],
       ['sign'],
       ['create'],
-      ['auth'],
       ['identity'],
+      ['server'],
       ['realm']
     ]
 

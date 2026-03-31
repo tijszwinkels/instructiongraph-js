@@ -10,7 +10,7 @@
  *   ig verify <file.json>     Verify signature
  *   ig sign <spec.json>       Sign a spec and print envelope
  *   ig create <spec.json>     Sign and publish
- *   ig auth                   Authenticate with hub
+ *   ig server login            Log in with your active identity
  *   ig identity               Show current identity
  *   ig server                 Show/set/remove hub server
  */
@@ -65,7 +65,6 @@ Commands:
   ig verify <file.json>            Verify signature
   ig sign <spec.json>              Sign spec, print envelope
   ig create <spec.json>            Sign and publish
-  ig auth                          Hub authentication
   ig identity                      Show current identity
   ig identity generate [--name N]  Generate a new identity
                        [--project]  Use ./.instructionGraph instead of ~/
@@ -74,6 +73,8 @@ Commands:
   ig identity list                 List available identities
   ig server                        Show current server
   ig server set <url>              Connect to a hub server
+  ig server login                  Log in with your active identity
+  ig server logout                 Log out
   ig server push                   Push all local objects to server
   ig server remove                 Disconnect (go offline)
   ig realm                              Show current default realm
@@ -93,9 +94,9 @@ function commandUsage(command) {
     verify: `Usage: ig verify <file.json>\n\nVerify an instructionGraph001 envelope on disk.`,
     sign: `Usage: ig sign <spec.json>\n\nBuild and sign a spec, then print the canonical envelope JSON.`,
     create: `Usage: ig create <spec.json>\n\nBuild, sign, and publish a spec to the configured store.`,
-    auth: `Usage: ig auth\n\nAuthenticate with the configured hub.`,
+
     identity: `Usage: ig identity [generate|activate|list] [options]\n\nShow or manage the active identity.\n\nSubcommands:\n  ig identity generate [--name N] [--project] [--activate]\n  ig identity activate <name>\n  ig identity list\n\nEnvironment:\n  INSTRUCTIONGRAPH_DIR  Override config directory location`,
-    server: `Usage: ig server [set <url> | remove | push]\n\nShow, configure, or remove the hub server connection.\n\nSubcommands:\n  ig server              Show current server status\n  ig server set <url>    Connect to a hub server for sync\n  ig server remove       Disconnect and go offline\n  ig server push         Push all local objects to the server\n\nWithout a server, all data stays on local filesystem only.\nWith a server, objects sync between local storage and the hub.`,
+    server: `Usage: ig server [set <url> | login | logout | remove | push]\n\nShow, configure, or remove the hub server connection.\n\nSubcommands:\n  ig server              Show current server status and auth\n  ig server set <url>    Connect to a hub server for sync\n  ig server login        Log in with your active identity\n  ig server logout       Log out from the hub\n  ig server remove       Disconnect and go offline\n  ig server push         Push all local objects to the server\n\nWithout a server, all data stays on local filesystem only.\nWith a server, objects sync between local storage and the hub.\nLogin uses your active identity (see ig identity).`,
     realm: `Usage: ig realm [set <realm|identity|dataverse001>]\n\nShow or set the default realm used for new objects.\n\n  ig realm set identity       Use current identity\'s realm (private)\n  ig realm set dataverse001   Use the public dataverse realm\n  ig realm set <pubkey>       Use any specific realm`
   }
 
@@ -335,6 +336,42 @@ async function identityActivate() {
     writeConfig(configDir, 'default-realm', kp.pubkey)
     console.log(`Updated default realm to identity realm: ${kp.pubkey}`)
   }
+
+  // Re-login if there's an existing server session
+  const savedToken = readConfig(configDir, 'auth-token', null)
+  const hubUrl = readConfig(configDir, 'hub-url', null)
+  if (savedToken && hubUrl) {
+    console.log('Re-authenticating with server...')
+    try {
+      // Build a fresh client with the new identity and authenticate
+      const dataDir = join(configDir, 'data')
+      const { createHubStore } = await import('../src/store/hub.js')
+      const { createFsStore } = await import('../src/store/fs.js')
+      const { createSyncStore } = await import('../src/store/sync.js')
+      const { createClient } = await import('../src/client.js')
+
+      const local = existsSync(dataDir) ? createFsStore({ dataDir }) : null
+      const hub = createHubStore({ url: hubUrl })
+      const store = local ? createSyncStore({ local, remote: hub }) : hub
+      const identity = { type: 'pem-file', path: pemPath, name }
+      const client = createClient({ store, identity })
+      await client.ready
+
+      const result = await client.authenticate()
+      if (result.ok) {
+        writeConfig(configDir, 'auth-token', result.token)
+        console.log(`Logged in as ${kp.pubkey}`)
+      } else {
+        // Clear stale token
+        const tokenPath = join(configDir, 'config', 'auth-token')
+        if (existsSync(tokenPath)) unlinkSync(tokenPath)
+        console.warn('Re-login failed. Run \'ig server login\' to authenticate.')
+      }
+    } catch (e) {
+      console.warn(`Re-login failed: ${e.message}`)
+      console.warn('Run \'ig server login\' to authenticate manually.')
+    }
+  }
 }
 
 function identityList() {
@@ -383,7 +420,7 @@ async function showRealm() {
   console.log('  <your pubkey>    Private — only visible to you (identity realm)')
   console.log('')
   console.log('When connected to a server, all objects are uploaded, but private')
-  console.log('objects are only accessible to you, after you authenticate (ig auth).')
+  console.log('objects are only accessible to you, after you log in (ig server login).')
   console.log('')
   console.log('To switch:')
   console.log('  ig realm set dataverse001        Go public')
@@ -433,7 +470,7 @@ function showServer() {
     } else {
       console.log('\x1b[33m○\x1b[0m Not authenticated')
       console.log('  You can read and write public objects (realm: dataverse001).')
-      console.log('  Run \'ig auth\' to also access your private objects.')
+      console.log('  Run \'ig server login\' to also access your private objects.')
     }
   } else {
     console.log('No server configured (offline mode).')
@@ -447,7 +484,7 @@ function showServer() {
     console.log('  \u2022 You can discover and fetch objects created by others')
     console.log('  \u2022 Local copies are always kept \u2014 you keep working if the server goes down')
     console.log('  \u2022 Private objects (identity realm) are uploaded too, but only you can')
-    console.log('    access them, after you authenticate with \'ig auth\'')
+    console.log('    access them, after you log in with \'ig server login\'')
   }
 }
 
@@ -463,7 +500,7 @@ function setServer() {
   console.log('Objects will now sync between local filesystem and the hub.')
   console.log('')
   console.log('Public objects (realm: dataverse001) will be visible to everyone.')
-  console.log('Private objects (identity realm) will only be accessible to you, after you authenticate with \'ig auth\'.')
+  console.log('Private objects (identity realm) will only be accessible to you, after you log in with \'ig server login\'.')
   console.log('')
   console.log('If you have existing local objects, push them to the server:')
   console.log('  ig server push')
@@ -529,6 +566,43 @@ function removeServer() {
 
   console.log('Server removed. Now in offline mode.')
   console.log('Your local objects are still on disk \u2014 nothing was deleted.')
+}
+
+async function serverLogin() {
+  const ctx = await makeClient()
+  if (!ctx.isOnline) die('No server configured. Run \'ig server set <url>\' first.')
+  printStatus(ctx)
+  const result = await ctx.client.authenticate()
+  if (result.ok) {
+    writeConfig(ctx.configDir, 'auth-token', result.token)
+    console.log(`Logged in as ${result.pubkey}`)
+  } else {
+    die('Login failed')
+  }
+}
+
+async function serverLogout() {
+  const configDir = findConfigDir()
+  const hubUrl = readConfig(configDir, 'hub-url', null)
+  if (!hubUrl) die('No server configured.')
+
+  const tokenPath = join(configDir, 'config', 'auth-token')
+  if (!existsSync(tokenPath)) {
+    console.log('Not logged in.')
+    return
+  }
+
+  // Best-effort: notify the hub
+  const token = readFileSync(tokenPath, 'utf-8').trim()
+  try {
+    await fetch(`${hubUrl}/auth/logout`, {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${token}` }
+    })
+  } catch { /* hub unreachable — still clear local token */ }
+
+  unlinkSync(tokenPath)
+  console.log('Logged out.')
 }
 
 // ─── Status ──────────────────────────────────────────────────────
@@ -635,20 +709,9 @@ async function main() {
       break
     }
 
-    case 'auth': {
-      const ctx = await makeClient()
-      if (!ctx.isOnline) die('No server configured. Run \'ig server set <url>\' first.')
-      printStatus(ctx)
-      const result = await ctx.client.authenticate()
-      if (result.ok) {
-        // Persist token for future commands
-        writeConfig(ctx.configDir, 'auth-token', result.token)
-        console.log(`Authenticated as ${result.pubkey}`)
-      } else {
-        die('Authentication failed')
-      }
+    case 'auth':  // hidden alias for 'ig server login'
+      await serverLogin()
       break
-    }
 
     case 'identity': {
       const subcmd = args[1]
@@ -681,12 +744,16 @@ async function main() {
         showServer()
       } else if (subcmd === 'set') {
         setServer()
+      } else if (subcmd === 'login') {
+        await serverLogin()
+      } else if (subcmd === 'logout') {
+        await serverLogout()
       } else if (subcmd === 'remove') {
         removeServer()
       } else if (subcmd === 'push') {
         await serverPush()
       } else {
-        die('Usage: ig server [set <url> | remove | push]')
+        die('Usage: ig server [set <url> | login | logout | remove | push]')
       }
       break
     }
