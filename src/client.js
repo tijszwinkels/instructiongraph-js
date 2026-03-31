@@ -171,8 +171,57 @@ export function createClient(opts = {}) {
 
     // ─── Create (build + validate + sign + publish) ─
 
-    async create(fields) {
+    /**
+     * Create a new object, or full-replace an existing one with allowUpdate.
+     *
+     * Unlike client.update(ref, patch) which deep-merges a partial patch,
+     * this does a full replace from the spec — only immutable fields
+     * (id, ref, pubkey, created_at) are preserved from the original.
+     *
+     * @param {object} fields - spec fields
+     * @param {object} [opts]
+     * @param {boolean} [opts.allowUpdate] - if true, update existing objects instead of failing
+     */
+    async create(fields, opts = {}) {
       requireIdentity()
+
+      // Check if object already exists (when spec has an explicit id)
+      if (fields.id) {
+        const existingRef = makeRef(signer.pubkey, fields.id)
+        let existing = null
+        try { existing = await store.get(existingRef) } catch { /* not found */ }
+
+        if (existing?.item) {
+          if (!opts.allowUpdate) {
+            throw new Error(
+              `Object ${existingRef} already exists (revision ${existing.item.revision || 0}). ` +
+              `Use --update to update it.`
+            )
+          }
+
+          // Update path: preserve immutables, auto-set revision/updated_at
+          const orig = existing.item
+          if (orig.pubkey !== signer.pubkey) {
+            throw new Error('Can only update your own objects')
+          }
+
+          const item = client.build({
+            ...fields,
+            id: orig.id,
+            created_at: orig.created_at,
+            revision: fields.revision ?? (orig.revision || 0) + 1,
+            updated_at: fields.updated_at ?? isoNow(),
+          })
+
+          await client.validateType(item)
+          const signed = await client.sign(item)
+          const result = await client.publish(signed)
+          if (!result.ok) throw new Error(`Publish failed: ${result.error || `status ${result.status}`}`)
+          return signed.item.ref
+        }
+      }
+
+      // New object path
       const item = client.build(fields)
       await client.validateType(item)
       const signed = await client.sign(item)

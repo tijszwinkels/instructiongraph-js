@@ -62,12 +62,12 @@ Usage:
 
 Commands:
   ig status                        Show full configuration status
-  ig get <ref>                     Fetch object
+  ig get <ref> [--identity N]      Fetch object (auth as identity for private)
   ig search [options]              Search objects
   ig inbound <ref> [options]       Inbound relations
   ig verify <file.json>            Verify signature
   ig sign <spec.json>              Sign spec, print envelope
-  ig create <spec.json>            Sign and publish
+  ig create <spec.json> [options]  Sign and publish
   ig identity                      Show current identity
   ig identity generate [--name N]  Generate a new identity
                        [--project]  Use ./.instructionGraph instead of ~/
@@ -91,12 +91,12 @@ Run 'ig <command> --help' for command-specific help.`)
 
 function commandUsage(command) {
   const docs = {
-    get: `Usage: ig get <ref>\n\nFetch an object by ref and print its JSON envelope.`,
+    get: `Usage: ig get <ref> [--identity N]\n\nFetch an object by ref and print its JSON envelope.\n\nFlags:\n  --identity N  Authenticate as identity N to access private objects`,
     search: `Usage: ig search [--type T] [--by PK] [--limit N] [--cursor C] [--counts] [--json]\n\nSearch objects on the configured hub/store.\n\nFlags:\n  --type T     Filter by object type\n  --by PK      Filter by pubkey\n  --limit N    Max results (default: 20)\n  --cursor C   Pagination cursor from previous result\n  --counts     Include inbound relation counts\n  --json       Output raw JSON array`,
     inbound: `Usage: ig inbound <ref> [--relation R] [--type T] [--from PK] [--limit N] [--cursor C] [--counts] [--json]\n\nList objects that point to the target ref.\n\nFlags:\n  --relation R  Filter by relation name\n  --type T      Filter by source object type\n  --from PK     Filter by source object pubkey\n  --limit N     Max results (default: 20)\n  --cursor C    Pagination cursor from previous result\n  --counts      Include inbound relation counts\n  --json        Output raw JSON array`,
     verify: `Usage: ig verify <file.json>\n\nVerify an instructionGraph001 envelope on disk.`,
     sign: `Usage: ig sign <spec.json>\n\nBuild and sign a spec, then print the canonical envelope JSON.`,
-    create: `Usage: ig create <spec.json>\n\nBuild, sign, and publish a spec to the configured store.`,
+    create: `Usage: ig create <spec.json> [--update] [--identity N] [--realm R] [--push] [--no-push]\n\nBuild, sign, and publish a spec to the configured store.\n\nFlags:\n  --update      Allow updating existing objects (auto-increments revision,\n                sets updated_at). Without this, fails if object exists.\n  --identity N  Sign with identity N instead of active identity\n  --realm R     Override default realm (e.g. dataverse001, identity)\n  --push        Push to server (auto-login if needed for identity realm)\n  --no-push     Store locally only, skip server push`,
 
     identity: `Usage: ig identity [generate|activate|list] [options]\n\nShow or manage the active identity.\n\nSubcommands:\n  ig identity generate [--name N] [--project] [--activate]\n  ig identity activate <name>\n  ig identity list\n\nEnvironment:\n  INSTRUCTIONGRAPH_DIR  Override config directory location`,
     server: `Usage: ig server [set <url> | login | logout | remove | push]\n\nShow, configure, or remove the hub server connection.\n\nSubcommands:\n  ig server              Show current server status and auth\n  ig server set <url>    Connect to a hub server for sync\n  ig server login        Log in with your active identity\n  ig server logout       Log out from the hub\n  ig server remove       Disconnect and go offline\n  ig server push [--all]  Push local objects (default: your realms only)\n\nWithout a server, all data stays on local filesystem only.\nWith a server, objects sync between local storage and the hub.\nLogin uses your active identity (see ig identity).`,
@@ -204,28 +204,37 @@ function listIdentityNames(configDir) {
   return [...names].sort()
 }
 
-async function makeClient() {
+/**
+ * @param {object} [overrides]
+ * @param {string} [overrides.identityName] - Use a specific identity instead of active
+ * @param {string} [overrides.realm] - Override the default realm
+ * @param {string} [overrides.token] - Override the auth token
+ * @param {boolean} [overrides.authenticate] - Authenticate with hub on connect
+ */
+async function makeClient(overrides = {}) {
   const configDir = findConfigDir()
   const hubUrl = readConfig(configDir, 'hub-url', null)  // null = no server configured
-  const defaultRealm = readConfig(configDir, 'default-realm', null)  // null → identity realm (private by default)
+  const defaultRealm = overrides.realm || readConfig(configDir, 'default-realm', null)
   const dataDir = join(configDir, 'data')
   const hasLocal = existsSync(dataDir)
 
   let store
+  let hub = null
   let isOnline = false
 
   // Load persisted auth token if available
-  const savedToken = readConfig(configDir, 'auth-token', null)
+  const savedToken = overrides.token ?? readConfig(configDir, 'auth-token', null)
 
   if (hubUrl && hasLocal) {
     // Both: sync store (local primary, hub sync)
     const local = createFsStore({ dataDir })
-    const hub = createHubStore({ url: hubUrl, token: savedToken })
+    hub = createHubStore({ url: hubUrl, token: savedToken })
     store = createSyncStore({ local, remote: hub })
     isOnline = true
   } else if (hubUrl) {
     // Hub only (no local data dir yet)
-    store = createHubStore({ url: hubUrl, token: savedToken })
+    hub = createHubStore({ url: hubUrl, token: savedToken })
+    store = hub
     isOnline = true
   } else if (hasLocal) {
     // Local only (offline mode)
@@ -238,11 +247,27 @@ async function makeClient() {
     )
   }
 
-  const identity = resolveIdentityConfig(configDir)
+  // Resolve identity: override or active
+  let identity
+  if (overrides.identityName) {
+    const pemPath = resolveIdentityPemPath(configDir, overrides.identityName)
+    if (!pemPath) die(`Identity not found: ${overrides.identityName}`)
+    identity = { type: 'pem-file', path: pemPath, name: overrides.identityName }
+  } else {
+    identity = resolveIdentityConfig(configDir)
+  }
 
   const client = createClient({ store, identity, defaultRealm })
   if (identity) await client.ready
-  return { client, configDir, isOnline, hubUrl }
+
+  // Auto-authenticate if requested (e.g. ig get --identity)
+  if (overrides.authenticate && isOnline && hub) {
+    if (!client.signer) die('Cannot authenticate — no identity configured.')
+    const authResult = await client.authenticate()
+    if (!authResult.ok) die(`Authentication failed for identity: ${overrides.identityName || 'active'}`)
+  }
+
+  return { client, configDir, isOnline, hubUrl, hub, store }
 }
 
 // ─── Identity generation ─────────────────────────────────────────
@@ -771,7 +796,9 @@ async function main() {
     case 'get': {
       const ref = args[1]
       if (!ref) die('Usage: ig get <ref>')
-      const ctx = await makeClient()
+
+      const identityName = flag('identity')
+      const ctx = await makeClient({ identityName, authenticate: !!identityName })
       printStatus(ctx)
       const obj = await ctx.client.get(ref)
       if (!obj) die(`Not found: ${ref}`)
@@ -867,11 +894,77 @@ async function main() {
     case 'create': {
       const file = args[1]
       if (!file) die('Usage: ig create <spec.json>')
-      const ctx = await makeClient()
+
+      const identityName = flag('identity')
+      const realm = flag('realm')
+      const noPush = args.includes('--no-push')
+      const forcePush = args.includes('--push')
+      const allowUpdate = args.includes('--update')
+
+      if (forcePush && noPush) die('Cannot use both --push and --no-push')
+
+      const ctx = await makeClient({ identityName, realm })
       printStatus(ctx)
+
       const spec = JSON.parse(readFileSync(resolve(file), 'utf-8'))
-      const ref = await ctx.client.create(spec)
-      console.log(ref)
+
+      // Pre-check: can't target someone else's identity realm
+      const specRealms = spec.in || []
+      const signerPubkey = ctx.client.pubkey
+      const foreignIdentityRealm = specRealms.find(r => r !== 'dataverse001' && r.length === 44 && r !== signerPubkey)
+      if (foreignIdentityRealm) {
+        die(`Cannot create in identity realm ${foreignIdentityRealm} \u2014 it belongs to a different pubkey.\n` +
+            `Your pubkey: ${signerPubkey}`)
+      }
+
+      // If --push with identity realm and not logged in, auto-authenticate
+      const hasIdentityRealm = specRealms.some(r => r !== 'dataverse001' && r.length === 44)
+      if (forcePush && hasIdentityRealm && ctx.isOnline) {
+        const savedToken = readConfig(ctx.configDir, 'auth-token', null)
+        if (!savedToken) {
+          console.log('Authenticating to push to identity realm...')
+          const result = await ctx.client.authenticate()
+          if (result.ok) {
+            writeConfig(ctx.configDir, 'auth-token', result.token)
+            console.log(`Logged in as ${result.pubkey}`)
+          } else {
+            die('Authentication failed \u2014 cannot push to identity realm.')
+          }
+        }
+      }
+
+      if (forcePush && !ctx.isOnline) {
+        die('Cannot push \u2014 no server configured. Run \'ig server set <url>\' first.')
+      }
+
+      if (noPush) {
+        // Local only: build + sign manually, store to fs directly
+        const { createFsStore: makeFsStore } = await import('../src/store/fs.js')
+        const { isoNow } = await import('../src/object.js')
+        const dataDir = join(ctx.configDir, 'data')
+        const local = makeFsStore({ dataDir })
+        const item = ctx.client.build(spec)
+
+        if (allowUpdate && spec.id) {
+          const existing = await local.get(item.ref).catch(() => null)
+          if (existing?.item) {
+            if (existing.item.pubkey !== signerPubkey) die('Can only update your own objects')
+            item.created_at = existing.item.created_at
+            item.revision = spec.revision ?? (existing.item.revision || 0) + 1
+            item.updated_at = spec.updated_at ?? isoNow()
+          }
+        }
+
+        await ctx.client.validateType(item)
+        const signed = await ctx.client.sign(item)
+        await local.put(signed)
+        console.log('Stored locally (server push skipped)')
+        console.log(signed.item.ref)
+      } else {
+        // Normal path: client.create handles existence check + update logic
+        const ref = await ctx.client.create(spec, { allowUpdate })
+        console.log(ref)
+      }
       break
     }
 
