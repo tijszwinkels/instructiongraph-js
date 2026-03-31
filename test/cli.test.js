@@ -255,6 +255,14 @@ describe('CLI', () => {
       )
       assert.equal(active.trim(), 'local-id')
 
+      // Root node should be bootstrapped into data/
+      const rootPath = join(localDir, '.instructionGraph', 'data',
+        'AxyU5_5vWmP2tO_klN4UpbZzRsuJEvJTrdwdg_gODxZJ.00000000-0000-0000-0000-000000000000.json')
+      await access(rootPath)
+      const root = JSON.parse(await readFile(rootPath, 'utf-8'))
+      assert.equal(root.item.type, 'ROOT')
+      assert.equal(root.item.ref, 'AxyU5_5vWmP2tO_klN4UpbZzRsuJEvJTrdwdg_gODxZJ.00000000-0000-0000-0000-000000000000')
+
       await rm(localDir, { recursive: true })
     })
   })

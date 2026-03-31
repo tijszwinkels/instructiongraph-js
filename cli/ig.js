@@ -290,6 +290,15 @@ async function identityGenerate() {
     console.log(`  Created: ${join(configDir, 'data/')}`)
     console.log(`  Created: ${join(configDir, 'config/')}`)
     console.log(`  Created: ${join(configDir, 'identities/')}`)
+
+    // Bootstrap root node into data/
+    try {
+      const { bootstrapRootNode } = await import('../src/bootstrap.js')
+      const hubUrl = readConfig(configDir, 'hub-url', null)
+      await bootstrapRootNode(join(configDir, 'data'), hubUrl)
+    } catch (e) {
+      console.warn(`Note: could not bootstrap root node (${e.message})`)
+    }
   }
 
   console.log(`Generated identity: ${name}`)
