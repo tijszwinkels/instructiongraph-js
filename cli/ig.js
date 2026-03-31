@@ -61,6 +61,7 @@ Usage:
   ig <command> [options]
 
 Commands:
+  ig status                        Show full configuration status
   ig get <ref>                     Fetch object
   ig search [options]              Search objects
   ig inbound <ref> [options]       Inbound relations
@@ -500,6 +501,103 @@ function showServer() {
   }
 }
 
+async function showStatus() {
+  const configDir = findConfigDir()
+  const home = homeConfigDir()
+  const isProjectLocal = configDir !== home
+
+  // ─── Storage ───
+  console.log('\x1b[1mStorage\x1b[0m')
+  console.log(`  Config: ${join(configDir, 'config')}`)
+  const dataDir = join(configDir, 'data')
+  if (existsSync(dataDir)) {
+    const files = readdirSync(dataDir).filter(f => f.endsWith('.json'))
+    console.log(`  Data:   ${dataDir} (${files.length} object${files.length === 1 ? '' : 's'})`)
+  } else {
+    console.log(`  Data:   ${dataDir} \x1b[33m(not created)\x1b[0m`)
+  }
+  const identitiesDir = join(configDir, 'identities')
+  console.log(`  Keys:   ${identitiesDir}${existsSync(identitiesDir) ? '' : ' \x1b[2m(not found)\x1b[0m'}`)
+  console.log('')
+
+  // ─── Identities ───
+  console.log('\x1b[1mIdentities\x1b[0m')
+  const allNames = listIdentityNames(configDir)
+  if (allNames.length === 0) {
+    console.log('  \x1b[33mNo identities found\x1b[0m')
+    console.log('  Run \'ig identity generate\' to create one.')
+  } else {
+    const activeName = readConfig(configDir, 'active-identity', 'default')
+    for (const name of allNames) {
+      const pemPath = resolveIdentityPemPath(configDir, name)
+      const isActive = name === activeName && pemPath
+      let line = isActive ? `  \x1b[32m● ${name}\x1b[0m` : `  ○ ${name}`
+      if (pemPath) {
+        try {
+          const { importPEM } = await import('../src/identity.js')
+          const pem = readFileSync(pemPath, 'utf-8')
+          const kp = await importPEM(pem)
+          line += `  ${kp.pubkey}`
+        } catch {
+          line += '  \x1b[33m(could not read key)\x1b[0m'
+        }
+      } else {
+        line += '  \x1b[33m(PEM not found)\x1b[0m'
+      }
+      console.log(line)
+    }
+    if (!resolveIdentityPemPath(configDir, activeName)) {
+      console.log(`  \x1b[33mActive identity "${activeName}" not found.\x1b[0m`)
+      console.log(`  Run 'ig identity activate <name>' to fix.`)
+    }
+  }
+  console.log('')
+
+  // ─── Realm ───
+  console.log('\x1b[1mDefault Realm\x1b[0m')
+  const defaultRealm = readConfig(configDir, 'default-realm', null)
+  if (defaultRealm) {
+    const realmLabel = defaultRealm === 'dataverse001' ? '(public)' :
+      defaultRealm.length === 44 ? '(identity realm \u2014 private)' : ''
+    console.log(`  ${defaultRealm}${realmLabel ? ` \x1b[2m${realmLabel}\x1b[0m` : ''}`)
+  } else {
+    // Derive from active identity like makeClient does
+    const activeName = readConfig(configDir, 'active-identity', 'default')
+    const pemPath = resolveIdentityPemPath(configDir, activeName)
+    if (pemPath) {
+      try {
+        const { importPEM } = await import('../src/identity.js')
+        const pem = readFileSync(pemPath, 'utf-8')
+        const kp = await importPEM(pem)
+        console.log(`  ${kp.pubkey} \x1b[2m(identity realm — private by default)\x1b[0m`)
+      } catch {
+        console.log('  \x1b[33m(could not determine — no active identity)\x1b[0m')
+      }
+    } else {
+      console.log('  \x1b[33m(not set — no active identity)\x1b[0m')
+      console.log('  Run \'ig realm set <realm>\' to configure.')
+    }
+  }
+  console.log('')
+
+  // ─── Server ───
+  console.log('\x1b[1mServer\x1b[0m')
+  const hubUrl = readConfig(configDir, 'hub-url', null)
+  if (hubUrl) {
+    console.log(`  URL: ${hubUrl}`)
+    const savedToken = readConfig(configDir, 'auth-token', null)
+    if (savedToken) {
+      console.log('  Auth: \x1b[32m● logged in\x1b[0m')
+    } else {
+      console.log('  Auth: \x1b[33m○ not logged in\x1b[0m')
+      console.log('  Run \'ig server login\' to sync private objects.')
+    }
+  } else {
+    console.log('  \x1b[33m○ offline\x1b[0m (no server configured)')
+    console.log('  Run \'ig server set <url>\' to connect.')
+  }
+}
+
 function setServer() {
   const url = args[2]
   if (!url) die('Usage: ig server set <url>')
@@ -658,13 +756,18 @@ function printStatus({ isOnline, hubUrl }) {
 // ─── Commands ────────────────────────────────────────────────────
 
 /** Commands that skip makeClient and status line. */
-const QUIET_COMMANDS = new Set(['identity', 'server', 'verify'])
+const QUIET_COMMANDS = new Set(['identity', 'server', 'status', 'verify'])
 
 async function main() {
   if (!cmd || cmd === '--help' || cmd === '-h') usage()
   if (hasHelp()) commandUsage(cmd)
 
   switch (cmd) {
+    case 'status': {
+      await showStatus()
+      break
+    }
+
     case 'get': {
       const ref = args[1]
       if (!ref) die('Usage: ig get <ref>')
