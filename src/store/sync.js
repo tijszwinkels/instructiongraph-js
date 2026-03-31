@@ -202,6 +202,22 @@ export function createSyncStore({ local, remote }) {
       return { total, pushed, errors }
     },
 
+    // ─── Auth: delegate to remote (hub) store ─────────
+
+    async authenticate(signer) {
+      if (typeof remote.authenticate !== 'function') {
+        throw new Error('Remote store does not support authenticate()')
+      }
+      return remote.authenticate(signer)
+    },
+
+    async logout() {
+      if (typeof remote.logout !== 'function') {
+        throw new Error('Remote store does not support logout()')
+      }
+      return remote.logout()
+    },
+
     async inbound(ref, opts = {}) {
       // Query both in parallel
       const [localResult, remoteResult] = await Promise.all([

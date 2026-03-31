@@ -328,4 +328,44 @@ describe('sync store', () => {
       assert.equal(result.errors, 0)
     })
   })
+
+  describe('authenticate / logout delegation', () => {
+    it('delegates authenticate() to remote store', async () => {
+      const local = createMockStore()
+      const remote = createMockHubStore()
+      remote.authenticate = async (signer) => ({ ok: true, pubkey: 'test-pk', token: 'tok123' })
+      const sync = createSyncStore({ local, remote })
+
+      const result = await sync.authenticate('fake-signer')
+      assert.equal(result.ok, true)
+      assert.equal(result.token, 'tok123')
+    })
+
+    it('throws if remote store lacks authenticate()', async () => {
+      const local = createMockStore()
+      const remote = createMockHubStore()
+      const sync = createSyncStore({ local, remote })
+
+      await assert.rejects(() => sync.authenticate('fake'), /does not support authenticate/)
+    })
+
+    it('delegates logout() to remote store', async () => {
+      const local = createMockStore()
+      const remote = createMockHubStore()
+      let logoutCalled = false
+      remote.logout = async () => { logoutCalled = true; return { ok: true } }
+      const sync = createSyncStore({ local, remote })
+
+      await sync.logout()
+      assert.ok(logoutCalled)
+    })
+
+    it('throws if remote store lacks logout()', async () => {
+      const local = createMockStore()
+      const remote = createMockHubStore()
+      const sync = createSyncStore({ local, remote })
+
+      await assert.rejects(() => sync.logout(), /does not support logout/)
+    })
+  })
 })

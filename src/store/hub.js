@@ -162,7 +162,7 @@ export function createHubStore({ url, token = null }) {
       if (!res.ok) throw new Error(`Token exchange failed: ${res.status}`)
       const data = await res.json()
       bearerToken = data.token
-      return data
+      return { ok: true, ...data }
     },
 
     /**
