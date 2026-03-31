@@ -781,7 +781,7 @@ function printStatus({ isOnline, hubUrl }) {
 // ─── Commands ────────────────────────────────────────────────────
 
 /** Commands that skip makeClient and status line. */
-const QUIET_COMMANDS = new Set(['identity', 'server', 'status', 'verify'])
+const QUIET_COMMANDS = new Set(['identity', 'server', 'status', 'verify', 'get', 'search', 'inbound'])
 
 async function main() {
   if (!cmd || cmd === '--help' || cmd === '-h') usage()
@@ -799,7 +799,6 @@ async function main() {
 
       const identityName = flag('identity')
       const ctx = await makeClient({ identityName, authenticate: !!identityName })
-      printStatus(ctx)
       const obj = await ctx.client.get(ref)
       if (!obj) die(`Not found: ${ref}`)
       console.log(JSON.stringify(obj, null, 2))
@@ -808,7 +807,6 @@ async function main() {
 
     case 'search': {
       const ctx = await makeClient()
-      printStatus(ctx)
       const result = await ctx.client.search({
         type: flag('type'),
         by: flag('by'),
@@ -837,7 +835,6 @@ async function main() {
       const ref = args[1]
       if (!ref) die('Usage: ig inbound <ref>')
       const ctx = await makeClient()
-      printStatus(ctx)
       const result = await ctx.client.inbound(ref, {
         relation: flag('relation'),
         type: flag('type'),
