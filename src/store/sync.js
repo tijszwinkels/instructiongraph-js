@@ -218,6 +218,14 @@ export function createSyncStore({ local, remote }) {
       return remote.logout()
     },
 
+    getToken() {
+      return typeof remote.getToken === 'function' ? remote.getToken() : null
+    },
+
+    setToken(t) {
+      if (typeof remote.setToken === 'function') remote.setToken(t)
+    },
+
     async inbound(ref, opts = {}) {
       // Query both in parallel
       const [localResult, remoteResult] = await Promise.all([

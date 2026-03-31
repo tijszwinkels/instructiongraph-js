@@ -210,15 +210,18 @@ async function makeClient() {
   let store
   let isOnline = false
 
+  // Load persisted auth token if available
+  const savedToken = readConfig(configDir, 'auth-token', null)
+
   if (hubUrl && hasLocal) {
     // Both: sync store (local primary, hub sync)
     const local = createFsStore({ dataDir })
-    const hub = createHubStore({ url: hubUrl })
+    const hub = createHubStore({ url: hubUrl, token: savedToken })
     store = createSyncStore({ local, remote: hub })
     isOnline = true
   } else if (hubUrl) {
     // Hub only (no local data dir yet)
-    store = createHubStore({ url: hubUrl })
+    store = createHubStore({ url: hubUrl, token: savedToken })
     isOnline = true
   } else if (hasLocal) {
     // Local only (offline mode)
@@ -422,10 +425,16 @@ function showServer() {
     console.log(`Server: ${hubUrl}`)
     console.log('Objects sync between local filesystem and the hub.')
     console.log('')
-    console.log('Both public and private objects are uploaded to the server.')
-    console.log('Public objects (realm: dataverse001) are visible to everyone.')
-    console.log('Private objects (identity realm) are stored on the server,')
-    console.log('but only accessible to you, after you authenticate with \'ig auth\'.')
+
+    const savedToken = readConfig(configDir, 'auth-token', null)
+    if (savedToken) {
+      console.log('\x1b[32m●\x1b[0m Authenticated')
+      console.log('  You can read and write both public and private objects.')
+    } else {
+      console.log('\x1b[33m○\x1b[0m Not authenticated')
+      console.log('  You can read and write public objects (realm: dataverse001).')
+      console.log('  Run \'ig auth\' to also access your private objects.')
+    }
   } else {
     console.log('No server configured (offline mode).')
     console.log('Objects are stored on local filesystem only.')
@@ -513,6 +522,11 @@ function removeServer() {
   }
 
   unlinkSync(configPath)
+
+  // Clear auth token too
+  const tokenPath = join(configDir, 'config', 'auth-token')
+  if (existsSync(tokenPath)) unlinkSync(tokenPath)
+
   console.log('Server removed. Now in offline mode.')
   console.log('Your local objects are still on disk \u2014 nothing was deleted.')
 }
@@ -627,8 +641,9 @@ async function main() {
       printStatus(ctx)
       const result = await ctx.client.authenticate()
       if (result.ok) {
+        // Persist token for future commands
+        writeConfig(ctx.configDir, 'auth-token', result.token)
         console.log(`Authenticated as ${result.pubkey}`)
-        console.log(`Token: ${result.token}`)
       } else {
         die('Authentication failed')
       }
