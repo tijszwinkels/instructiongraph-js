@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 
 /**
- * ig — CLI for InstructionGraph.
+ * ig - CLI for InstructionGraph.
  *
  * Usage:
  *   ig get <ref>              Fetch and print object
@@ -45,7 +45,7 @@ function die(msg) {
 }
 
 function usage() {
-  console.log(`ig — InstructionGraph CLI
+  console.log(`ig - InstructionGraph CLI
 
 InstructionGraph is a novel, self-describing graph data format designed for
 exchanging data, concepts, and applications between LLMs. Each node carries
@@ -123,7 +123,7 @@ function findConfigDir() {
     dir = resolve(dir, '..')
   }
 
-  // 3. Default: ~/.instructionGraph (always — never null)
+  // 3. Default: ~/.instructionGraph (always - never null)
   return homeConfigDir()
 }
 
@@ -307,7 +307,7 @@ async function identityGenerate() {
   const hubUrl = readConfig(configDir, 'hub-url', null)
   if (!hubUrl) {
     console.log('')
-    console.log('You are currently offline — objects stay on local filesystem only.')
+    console.log('You are currently offline - objects stay on local filesystem only.')
     console.log('To sync with a hub server:')
     console.log('  ig server set https://dataverse001.net')
   }
@@ -401,13 +401,13 @@ async function showRealm() {
       console.log(`Current realm: ${configuredRealm}`)
     }
   } else {
-    // No explicit realm — check if we have an identity (identity realm default)
+    // No explicit realm - check if we have an identity (identity realm default)
     const identityConfig = resolveIdentityConfig(configDir)
     if (identityConfig) {
       const { importPEM } = await import('../src/identity.js')
       const pem = readFileSync(identityConfig.path, 'utf-8')
       const kp = await importPEM(pem)
-      console.log(`Current realm: ${kp.pubkey} (identity realm — private)`)
+      console.log(`Current realm: ${kp.pubkey} (identity realm - private)`)
       console.log('New objects will only be visible to you.')
     } else {
       console.log('Current realm: <no identity configured>')
@@ -416,8 +416,8 @@ async function showRealm() {
 
   console.log('')
   console.log('The realm controls who can see your objects:')
-  console.log('  dataverse001     Public — visible to everyone')
-  console.log('  <your pubkey>    Private — only visible to you (identity realm)')
+  console.log('  dataverse001     Public - visible to everyone')
+  console.log('  <your pubkey>    Private - only visible to you (identity realm)')
   console.log('')
   console.log('When connected to a server, all objects are uploaded, but private')
   console.log('objects are only accessible to you, after you log in (ig server login).')
@@ -447,7 +447,7 @@ async function setRealm() {
     console.log('Set default realm: dataverse001 (public)')
     console.log('New objects will be visible to everyone.')
   } else {
-    console.log(`Set default realm: ${realm} (identity realm — private)`)
+    console.log(`Set default realm: ${realm} (identity realm - private)`)
     console.log('New objects will only be visible to you.')
   }
 }
@@ -470,7 +470,8 @@ function showServer() {
     } else {
       console.log('\x1b[33m○\x1b[0m Not authenticated')
       console.log('  You can read and write public objects (realm: dataverse001).')
-      console.log('  Run \'ig server login\' to also access your private objects.')
+      console.log('  Private objects (identity realm) stay local until you log in.')
+      console.log('  Run \'ig server login\' to sync private objects with the server.')
     }
   } else {
     console.log('No server configured (offline mode).')
@@ -483,8 +484,8 @@ function showServer() {
     console.log('  \u2022 Your public objects (realm: dataverse001) become discoverable by others')
     console.log('  \u2022 You can discover and fetch objects created by others')
     console.log('  \u2022 Local copies are always kept \u2014 you keep working if the server goes down')
-    console.log('  \u2022 Private objects (identity realm) are uploaded too, but only you can')
-    console.log('    access them, after you log in with \'ig server login\'')
+    console.log('  \u2022 Private objects (identity realm) stay local until you log in')
+    console.log('    with \'ig server login\', then they sync with the server too')
   }
 }
 
@@ -500,7 +501,7 @@ function setServer() {
   console.log('Objects will now sync between local filesystem and the hub.')
   console.log('')
   console.log('Public objects (realm: dataverse001) will be visible to everyone.')
-  console.log('Private objects (identity realm) will only be accessible to you, after you log in with \'ig server login\'.')
+  console.log('Private objects (identity realm) stay local until you log in with \'ig server login\'.')
   console.log('')
   console.log('If you have existing local objects, push them to the server:')
   console.log('  ig server push')
@@ -539,6 +540,8 @@ async function serverPush() {
       const n = `[${index + 1}/${total}]`
       if (status === 'ok') {
         process.stderr.write(`${n} \x1b[32m✓\x1b[0m ${ref}\n`)
+      } else if (status === 'skipped') {
+        process.stderr.write(`${n} \x1b[33m⊘\x1b[0m ${ref} (private, skipped)\n`)
       } else {
         process.stderr.write(`${n} \x1b[31m✗\x1b[0m ${ref}: ${error}\n`)
       }
@@ -546,7 +549,11 @@ async function serverPush() {
   })
 
   console.log('')
-  console.log(`Done. ${result.pushed} pushed, ${result.errors} errors, ${result.total} total.`)
+  const parts = [`${result.pushed} pushed`]
+  if (result.skipped) parts.push(`${result.skipped} skipped (private, not logged in)`)
+  if (result.errors) parts.push(`${result.errors} errors`)
+  parts.push(`${result.total} total`)
+  console.log(`Done. ${parts.join(', ')}.`)
 }
 
 function removeServer() {
@@ -599,7 +606,7 @@ async function serverLogout() {
       method: 'POST',
       headers: { Authorization: `Bearer ${token}` }
     })
-  } catch { /* hub unreachable — still clear local token */ }
+  } catch { /* hub unreachable - still clear local token */ }
 
   unlinkSync(tokenPath)
   console.log('Logged out.')

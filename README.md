@@ -14,6 +14,22 @@ Every object is a self-contained JSON fragment carrying content, instructions fo
 
 This library works entirely **offline-first** — objects are stored as JSON files on your filesystem. Optionally connect to a hub server to sync with others. Even when connected, data stays **local first**. Everything is cached locally, so you never lose access to your own data or data that you consulted before.
 
+## Where Data Lives
+
+Your data lives in different places depending on your connection and login state:
+
+| Mode | Public objects (`dataverse001`) | Private objects (identity realm) |
+|---|---|---|
+| **Offline** | Local filesystem only | Local filesystem only |
+| **Online, not logged in** | Read from & pushed to hub | Local filesystem only |
+| **Online, logged in** | Read from & pushed to hub | Read from & pushed to hub (only you can read them) |
+
+**Local filesystem** means `.instructionGraph/data/` in your project or home directory. Objects are plain JSON files.
+
+**Online** means you've connected to a hub server with `ig server set <url>`. Public objects sync automatically — yours become discoverable by others, and you can fetch theirs.
+
+**Logged in** means you've authenticated with `ig server login`. This proves you own your identity, so the hub can enforce access control on your private objects. Without logging in, private objects stay safely on your local filesystem and are never sent to the server.
+
 ## Install
 
 ```bash

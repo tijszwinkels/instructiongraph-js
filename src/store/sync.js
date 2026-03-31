@@ -21,15 +21,40 @@
  */
 export function createSyncStore({ local, remote }) {
 
+  /**
+   * Check if an object has any identity-realm (non-public) realm membership.
+   * Identity realms are pubkeys used as realm names — any realm that isn't
+   * a well-known public realm like 'dataverse001'.
+   */
+  function hasIdentityRealm(obj) {
+    const realms = obj?.item?.in || []
+    return realms.some(r => r !== 'dataverse001')
+  }
+
+  /** Check if we're currently authenticated with the remote. */
+  function isAuthenticated() {
+    return typeof remote.getToken === 'function' && remote.getToken() != null
+  }
+
+  /**
+   * Check if an object should be pushed to the remote.
+   * Identity-realm objects are only pushed when authenticated.
+   */
+  function shouldPushToRemote(obj) {
+    if (hasIdentityRealm(obj) && !isAuthenticated()) return false
+    return true
+  }
+
   /** Cache a single object locally (fire-and-forget, won't downgrade). */
   function cacheLocally(obj) {
     if (!obj?.item?.ref) return
     local.put(obj).catch(e => console.warn(`[sync] local cache failed: ${e.message}`))
   }
 
-  /** Push a single object to hub (fire-and-forget). */
+  /** Push a single object to hub (fire-and-forget). Skips identity-realm objects when not authenticated. */
   function pushToRemote(obj) {
     if (!obj?.item?.ref) return
+    if (!shouldPushToRemote(obj)) return
     remote.put(obj).catch(e => console.warn(`[sync] remote push failed: ${e.message}`))
   }
 
@@ -99,17 +124,16 @@ export function createSyncStore({ local, remote }) {
       // Local first
       const localResult = await local.put(signedObj)
 
+      // Skip remote push for identity-realm objects when not authenticated
+      if (!shouldPushToRemote(signedObj)) {
+        return localResult
+      }
+
       // Remote: non-fatal
       try {
         const remoteResult = await remote.put(signedObj)
         if (remoteResult && !remoteResult.ok && remoteResult.status === 403) {
-          const realms = signedObj.item?.in || []
-          const hasIdentityRealm = realms.some(r => r !== 'dataverse001')
-          if (hasIdentityRealm) {
-            console.warn(`[sync] Server rejected private object (not authenticated). Run 'ig server login' to push private objects.`)
-          } else {
-            console.warn(`[sync] Server rejected object (403).`)
-          }
+          console.warn(`[sync] Server rejected object (403).`)
         }
       } catch (e) {
         console.warn(`[sync] remote put failed (non-fatal): ${e.message}`)
@@ -149,40 +173,10 @@ export function createSyncStore({ local, remote }) {
 
     /**
      * Push all local objects to the remote hub.
+     * Skips identity-realm objects when not authenticated.
      * @param {object} [opts]
-     * @param {(info: {ref: string, index: number, total: number, status: 'ok'|'error', error?: string}) => void} [opts.onProgress]
-     * @returns {Promise<{total: number, pushed: number, errors: number}>}
-     */
-    async pushAll(opts = {}) {
-      const { onProgress } = opts
-      const localResult = await local.search({ limit: 100000 })
-      const items = localResult.items || []
-      let pushed = 0
-      let errors = 0
-
-      for (let i = 0; i < items.length; i++) {
-        const obj = items[i]
-        const ref = obj.item?.ref
-        if (!ref) continue
-
-        try {
-          await remote.put(obj)
-          pushed++
-          if (onProgress) onProgress({ ref, index: i, total: items.length, status: 'ok' })
-        } catch (e) {
-          errors++
-          if (onProgress) onProgress({ ref, index: i, total: items.length, status: 'error', error: e.message })
-        }
-      }
-
-      return { total: items.length, pushed, errors }
-    },
-
-    /**
-     * Push all local objects to the remote hub.
-     * @param {object} [opts]
-     * @param {(progress: {ref: string, index: number, total: number, status: 'ok'|'error'}) => void} [opts.onProgress]
-     * @returns {Promise<{total: number, pushed: number, errors: number}>}
+     * @param {(info: {ref: string, index: number, total: number, status: 'ok'|'error'|'skipped', error?: string}) => void} [opts.onProgress]
+     * @returns {Promise<{total: number, pushed: number, skipped: number, errors: number}>}
      */
     async pushAll(opts = {}) {
       const { onProgress } = opts
@@ -190,25 +184,31 @@ export function createSyncStore({ local, remote }) {
       const items = allLocal.items || []
       const total = items.length
       let pushed = 0
+      let skipped = 0
       let errors = 0
 
       for (let i = 0; i < items.length; i++) {
         const obj = items[i]
         const ref = obj.item?.ref
         if (!ref) continue
-        let status = 'ok'
+
+        if (!shouldPushToRemote(obj)) {
+          skipped++
+          if (onProgress) onProgress({ ref, index: i, total, status: 'skipped' })
+          continue
+        }
+
         try {
           await remote.put(obj)
           pushed++
+          if (onProgress) onProgress({ ref, index: i, total, status: 'ok' })
         } catch (e) {
           errors++
-          status = 'error'
-          console.warn(`[sync] pushAll failed for ${ref}: ${e.message}`)
+          if (onProgress) onProgress({ ref, index: i, total, status: 'error', error: e.message })
         }
-        if (onProgress) onProgress({ ref, index: i, total, status })
       }
 
-      return { total, pushed, errors }
+      return { total, pushed, skipped, errors }
     },
 
     // ─── Auth: delegate to remote (hub) store ─────────

@@ -61,11 +61,11 @@ function createUnreachableStore() {
   }
 }
 
-function makeObj(ref, revision = 0) {
+function makeObj(ref, revision = 0, realms = ['dataverse001']) {
   return {
     is: 'instructionGraph001',
     signature: 'mock',
-    item: { ref, id: ref.split('.')[1], pubkey: ref.split('.')[0], revision, type: 'TEST', created_at: '2026-01-01T00:00:00Z', content: {} }
+    item: { ref, id: ref.split('.')[1], pubkey: ref.split('.')[0], revision, in: realms, type: 'TEST', created_at: '2026-01-01T00:00:00Z', content: {} }
   }
 }
 
@@ -326,6 +326,84 @@ describe('sync store', () => {
       assert.equal(result.total, 0)
       assert.equal(result.pushed, 0)
       assert.equal(result.errors, 0)
+    })
+  })
+
+  describe('identity-realm gating: skip remote push when not authenticated', () => {
+    it('put: skips remote push for identity-realm objects when not authenticated', async () => {
+      const local = createMockStore()
+      const remote = createMockHubStore()
+      // remote has no getToken → not authenticated
+      const sync = createSyncStore({ local, remote })
+
+      const privateObj = makeObj('pk.1', 1, ['mypubkey'])
+      await sync.put(privateObj)
+
+      assert.ok(local.data['pk.1'], 'should store locally')
+      assert.ok(!remote.data['pk.1'], 'should NOT push to remote')
+    })
+
+    it('put: pushes identity-realm objects when authenticated', async () => {
+      const local = createMockStore()
+      const remote = createMockHubStore()
+      remote.getToken = () => 'valid-token'
+      const sync = createSyncStore({ local, remote })
+
+      const privateObj = makeObj('pk.1', 1, ['mypubkey'])
+      await sync.put(privateObj)
+
+      assert.ok(local.data['pk.1'], 'should store locally')
+      assert.ok(remote.data['pk.1'], 'should push to remote when authenticated')
+    })
+
+    it('put: always pushes public (dataverse001) objects regardless of auth', async () => {
+      const local = createMockStore()
+      const remote = createMockHubStore()
+      // no getToken → not authenticated
+      const sync = createSyncStore({ local, remote })
+
+      const publicObj = makeObj('pk.1', 1, ['dataverse001'])
+      await sync.put(publicObj)
+
+      assert.ok(local.data['pk.1'], 'should store locally')
+      assert.ok(remote.data['pk.1'], 'should push public objects to remote')
+    })
+
+    it('pushAll: skips identity-realm objects when not authenticated', async () => {
+      const local = createMockStore({
+        'pk.1': makeObj('pk.1', 1, ['dataverse001']),
+        'pk.2': makeObj('pk.2', 1, ['mypubkey']),
+        'pk.3': makeObj('pk.3', 1, ['dataverse001', 'mypubkey'])
+      })
+      const remote = createMockHubStore()
+      // no getToken → not authenticated
+      const sync = createSyncStore({ local, remote })
+
+      const events = []
+      const result = await sync.pushAll({ onProgress: (info) => events.push(info) })
+
+      assert.equal(result.pushed, 1, 'only public object pushed')
+      assert.equal(result.skipped, 2, 'two private objects skipped')
+      assert.ok(remote.data['pk.1'], 'public object pushed')
+      assert.ok(!remote.data['pk.2'], 'pure private object not pushed')
+      assert.ok(!remote.data['pk.3'], 'mixed-realm object not pushed (has identity realm)')
+
+      const skippedEvents = events.filter(e => e.status === 'skipped')
+      assert.equal(skippedEvents.length, 2)
+    })
+
+    it('pushAll: pushes all objects when authenticated', async () => {
+      const local = createMockStore({
+        'pk.1': makeObj('pk.1', 1, ['dataverse001']),
+        'pk.2': makeObj('pk.2', 1, ['mypubkey'])
+      })
+      const remote = createMockHubStore()
+      remote.getToken = () => 'valid-token'
+      const sync = createSyncStore({ local, remote })
+
+      const result = await sync.pushAll()
+      assert.equal(result.pushed, 2)
+      assert.equal(result.skipped, 0)
     })
   })
 
