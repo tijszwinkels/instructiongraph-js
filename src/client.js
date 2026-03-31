@@ -172,7 +172,12 @@ export function createClient(opts = {}) {
     // ─── Create (build + validate + sign + publish) ─
 
     /**
-     * Create a new object, or update an existing one with --update.
+     * Create a new object, or full-replace an existing one with allowUpdate.
+     *
+     * Unlike client.update(ref, patch) which deep-merges a partial patch,
+     * this does a full replace from the spec — only immutable fields
+     * (id, ref, pubkey, created_at) are preserved from the original.
+     *
      * @param {object} fields - spec fields
      * @param {object} [opts]
      * @param {boolean} [opts.allowUpdate] - if true, update existing objects instead of failing

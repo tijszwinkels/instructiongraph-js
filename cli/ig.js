@@ -209,6 +209,7 @@ function listIdentityNames(configDir) {
  * @param {string} [overrides.identityName] - Use a specific identity instead of active
  * @param {string} [overrides.realm] - Override the default realm
  * @param {string} [overrides.token] - Override the auth token
+ * @param {boolean} [overrides.authenticate] - Authenticate with hub on connect
  */
 async function makeClient(overrides = {}) {
   const configDir = findConfigDir()
@@ -258,6 +259,14 @@ async function makeClient(overrides = {}) {
 
   const client = createClient({ store, identity, defaultRealm })
   if (identity) await client.ready
+
+  // Auto-authenticate if requested (e.g. ig get --identity)
+  if (overrides.authenticate && isOnline && hub) {
+    if (!client.signer) die('Cannot authenticate — no identity configured.')
+    const authResult = await client.authenticate()
+    if (!authResult.ok) die(`Authentication failed for identity: ${overrides.identityName || 'active'}`)
+  }
+
   return { client, configDir, isOnline, hubUrl, hub, store }
 }
 
@@ -789,37 +798,7 @@ async function main() {
       if (!ref) die('Usage: ig get <ref>')
 
       const identityName = flag('identity')
-      let ctx
-
-      if (identityName) {
-        // Authenticate as specified identity to access their private objects
-        const configDir = findConfigDir()
-        const pemPath = resolveIdentityPemPath(configDir, identityName)
-        if (!pemPath) die(`Identity not found: ${identityName}`)
-
-        const hubUrl = readConfig(configDir, 'hub-url', null)
-        if (!hubUrl) die('Cannot fetch private objects offline — no server configured.')
-
-        // Create a hub store and authenticate with the specified identity
-        const { importPEM, createSigner } = await import('../src/identity.js')
-        const pem = readFileSync(pemPath, 'utf-8')
-        const kp = await importPEM(pem)
-        const signer = createSigner(kp)
-        const hub = createHubStore({ url: hubUrl })
-        const authResult = await hub.authenticate(signer)
-        if (!authResult.ok) die(`Authentication failed for identity: ${identityName}`)
-
-        // Use authenticated hub for this request
-        const dataDir = join(configDir, 'data')
-        const local = existsSync(dataDir) ? createFsStore({ dataDir }) : null
-        const store = local ? createSyncStore({ local, remote: hub }) : hub
-        const client = createClient({ store, identity: { type: 'pem-file', path: pemPath, name: identityName } })
-        await client.ready
-        ctx = { client, configDir, isOnline: true, hubUrl }
-      } else {
-        ctx = await makeClient()
-      }
-
+      const ctx = await makeClient({ identityName, authenticate: !!identityName })
       printStatus(ctx)
       const obj = await ctx.client.get(ref)
       if (!obj) die(`Not found: ${ref}`)
@@ -960,35 +939,27 @@ async function main() {
 
       if (noPush) {
         // Local only: build + sign manually, store to fs directly
+        const { createFsStore: makeFsStore } = await import('../src/store/fs.js')
+        const { isoNow } = await import('../src/object.js')
+        const dataDir = join(ctx.configDir, 'data')
+        const local = makeFsStore({ dataDir })
         const item = ctx.client.build(spec)
+
         if (allowUpdate && spec.id) {
-          // Check for existing and handle update locally
-          const { createFsStore: makeFsStore } = await import('../src/store/fs.js')
-          const dataDir = join(ctx.configDir, 'data')
-          const local = makeFsStore({ dataDir })
-          let existing = null
-          try { existing = await local.get(item.ref) } catch { /* not found */ }
+          const existing = await local.get(item.ref).catch(() => null)
           if (existing?.item) {
             if (existing.item.pubkey !== signerPubkey) die('Can only update your own objects')
             item.created_at = existing.item.created_at
             item.revision = spec.revision ?? (existing.item.revision || 0) + 1
-            item.updated_at = spec.updated_at ?? new Date().toISOString().replace(/\.\d{3}Z$/, 'Z')
+            item.updated_at = spec.updated_at ?? isoNow()
           }
-          await ctx.client.validateType(item)
-          const signed = await ctx.client.sign(item)
-          await local.put(signed)
-          console.log('Stored locally (server push skipped)')
-          console.log(signed.item.ref)
-        } else {
-          await ctx.client.validateType(item)
-          const signed = await ctx.client.sign(item)
-          const { createFsStore: makeFsStore } = await import('../src/store/fs.js')
-          const dataDir = join(ctx.configDir, 'data')
-          const local = makeFsStore({ dataDir })
-          await local.put(signed)
-          console.log('Stored locally (server push skipped)')
-          console.log(signed.item.ref)
         }
+
+        await ctx.client.validateType(item)
+        const signed = await ctx.client.sign(item)
+        await local.put(signed)
+        console.log('Stored locally (server push skipped)')
+        console.log(signed.item.ref)
       } else {
         // Normal path: client.create handles existence check + update logic
         const ref = await ctx.client.create(spec, { allowUpdate })
