@@ -82,6 +82,12 @@ describe('CLI', () => {
     const pem = generateKeyPairSync('ec', { namedCurve: 'prime256v1' })
       .privateKey.export({ format: 'pem', type: 'pkcs8' }).toString()
     await writeFile(join(igDir, 'identities', 'default', 'private.pem'), pem)
+
+    // Second identity: 'alt'
+    await mkdir(join(igDir, 'identities', 'alt'), { recursive: true })
+    const altPem = generateKeyPairSync('ec', { namedCurve: 'prime256v1' })
+      .privateKey.export({ format: 'pem', type: 'pkcs8' }).toString()
+    await writeFile(join(igDir, 'identities', 'alt', 'private.pem'), altPem)
   })
 
   after(async () => { await hub.close() })
@@ -132,6 +138,57 @@ describe('CLI', () => {
 
     const valid = await verify(obj.item.pubkey, obj.signature, obj.item)
     assert.ok(valid, 'published object should have valid signature')
+  })
+
+  it('ig create --identity: signs with alternate identity', async () => {
+    const specPath = join(projectDir, 'alt-spec.json')
+    await writeFile(specPath, JSON.stringify({ type: 'NOTE', in: ['dataverse001'], content: { text: 'alt-identity' } }))
+
+    const { stdout } = await ig('create', specPath, '--identity', 'alt')
+    const ref = stdout.trim().split('\n').pop()
+    assert.ok(stored.has(ref), 'should be stored on hub')
+
+    // Should be signed by alt identity, not default
+    const { stdout: defaultId } = await ig('identity')
+    const defaultPubkey = defaultId.match(/Pubkey: (\S+)/)?.[1]
+    const obj = stored.get(ref)
+    assert.notEqual(obj.item.pubkey, defaultPubkey, 'should not use default pubkey')
+    assert.ok(await verify(obj.item.pubkey, obj.signature, obj.item), 'valid signature')
+  })
+
+  it('ig create --realm: overrides default realm', async () => {
+    const specPath = join(projectDir, 'realm-spec.json')
+    await writeFile(specPath, JSON.stringify({ type: 'NOTE', content: { text: 'realm-test' } }))
+
+    const { stdout } = await ig('create', specPath, '--realm', 'dataverse001')
+    const ref = stdout.trim().split('\n').pop()
+    const obj = stored.get(ref)
+    assert.ok(obj.item.in.includes('dataverse001'), 'should be in dataverse001 realm')
+  })
+
+  it('ig create --no-push: stores locally only', async () => {
+    const specPath = join(projectDir, 'local-spec.json')
+    await writeFile(specPath, JSON.stringify({ type: 'NOTE', in: ['dataverse001'], content: { text: 'local-only' } }))
+
+    const hubSizeBefore = stored.size
+    const { stdout } = await ig('create', specPath, '--no-push')
+    const ref = stdout.trim().split('\n').pop()
+    assert.equal(stored.size, hubSizeBefore, 'should not push to hub')
+
+    // But should exist locally
+    const localPath = join(projectDir, '.instructionGraph', 'data', `${ref}.json`)
+    await access(localPath) // throws if missing
+  })
+
+  it('ig create: rejects foreign identity realm', async () => {
+    const specPath = join(projectDir, 'foreign-spec.json')
+    const fakePubkey = 'Axxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx'
+    await writeFile(specPath, JSON.stringify({ type: 'NOTE', in: [fakePubkey], content: { text: 'sneaky' } }))
+
+    await assert.rejects(
+      ig('create', specPath),
+      err => err.stderr.includes('belongs to a different pubkey')
+    )
   })
 
   it('ig get: fetches from hub', async () => {
