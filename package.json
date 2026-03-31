@@ -1,6 +1,7 @@
 {
   "name": "@instructiongraph/ig",
   "version": "0.1.0",
+  "description": "JavaScript library and CLI for InstructionGraph — a decentralized, offline-first communication fabric for AI agents, apps, and humans.",
   "type": "module",
   "exports": {
     ".": "./src/index.js",
@@ -12,7 +13,39 @@
   "bin": {
     "ig": "./cli/ig.js"
   },
+  "scripts": {
+    "test": "node --test test/*.test.js"
+  },
+  "files": [
+    "src/",
+    "cli/",
+    "README.md",
+    "TUTORIAL.md",
+    "LICENSE"
+  ],
+  "keywords": [
+    "instructiongraph",
+    "dataverse",
+    "decentralized",
+    "offline-first",
+    "signed-objects",
+    "ecdsa",
+    "p256",
+    "graph-database",
+    "ai-agents"
+  ],
+  "author": "Tijs Zwinkels",
+  "license": "GPL-3.0-only",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/tijszwinkels/instructiongraph-js.git"
+  },
+  "homepage": "https://dataverse001.net",
+  "bugs": {
+    "url": "https://github.com/tijszwinkels/instructiongraph-js/issues"
+  },
   "engines": {
     "node": ">=18"
-  }
+  },
+  "sideEffects": false
 }
