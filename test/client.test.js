@@ -99,8 +99,14 @@ describe('client', () => {
           content: {
             schema: {
               type: 'object',
-              required: ['title'],
-              properties: { title: { type: 'string' }, body: { type: 'string' } }
+              required: ['content'],
+              properties: {
+                content: {
+                  type: 'object',
+                  required: ['title'],
+                  properties: { title: { type: 'string' }, body: { type: 'string' } }
+                }
+              }
             }
           }
         }
@@ -137,6 +143,77 @@ describe('client', () => {
         content: { title: 'Hello' }
       })
       assert.ok(ref)
+    })
+
+    it('validates item-level required fields (not just content)', async () => {
+      // Regression: validateType used to pass item.content instead of item to validateSchema,
+      // so item-level required fields like 'instruction' were checked against content.
+      const typeRef2 = 'pk.recipe-type'
+      const recipeType = {
+        is: 'instructionGraph001', signature: 'sig',
+        item: {
+          id: 'recipe-type', pubkey: 'pk', ref: typeRef2,
+          type: 'TYPE',
+          content: {
+            schema: {
+              type: 'object',
+              required: ['instruction', 'content'],
+              properties: {
+                instruction: { type: 'string' },
+                content: {
+                  type: 'object',
+                  required: ['name'],
+                  properties: { name: { type: 'string' } }
+                }
+              }
+            }
+          }
+        }
+      }
+
+      const objects = new Map([[typeRef2, recipeType]])
+      const mockStore = {
+        async get(ref) { return objects.get(ref) || null },
+        async put(obj) { objects.set(obj.item.ref, obj); return { ok: true } },
+        async search() { return { items: [], cursor: null } },
+        async inbound() { return { items: [], cursor: null } }
+      }
+
+      const ig = createClient({
+        store: mockStore,
+        identity: { type: 'credentials', username: 'recipe-test', password: 'recipe-test-pw' }
+      })
+      await ig.ready
+
+      // Should pass: item has instruction + content.name after build
+      const ref2 = await ig.create({
+        type: 'RECIPE',
+        instruction: 'A recipe for testing',
+        relations: { type_def: [{ ref: typeRef2 }] },
+        content: { name: 'Test Recipe' }
+      })
+      assert.ok(ref2)
+
+      // Should reject: missing instruction
+      await assert.rejects(
+        () => ig.create({
+          type: 'RECIPE',
+          relations: { type_def: [{ ref: typeRef2 }] },
+          content: { name: 'No instruction' }
+        }),
+        /instruction.*required/
+      )
+
+      // Should reject: missing content.name
+      await assert.rejects(
+        () => ig.create({
+          type: 'RECIPE',
+          instruction: 'Has instruction',
+          relations: { type_def: [{ ref: typeRef2 }] },
+          content: {}
+        }),
+        /name.*required/
+      )
     })
   })
 

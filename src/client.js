@@ -163,7 +163,7 @@ export function createClient(opts = {}) {
       const schema = typeObj?.item?.content?.schema
       if (!schema) return
 
-      const errors = validateSchema(item.content ?? {}, schema)
+      const errors = validateSchema(item, schema, 'item')
       if (errors.length > 0) {
         throw new Error(`TYPE validation failed: ${errors.join('; ')}`)
       }
