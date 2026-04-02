@@ -481,4 +481,96 @@ describe('sync store', () => {
       await assert.rejects(() => sync.logout(), /does not support logout/)
     })
   })
+
+  describe('realm filtering on get', () => {
+    const PK_ALICE = 'AliceAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA'
+    const PK_BOB = 'BobBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB'
+
+    it('filters out objects from other identity realms (hub unreachable)', async () => {
+      const privateObj = makeObj(`${PK_BOB}.1`, 1, [PK_BOB])
+      const local = createMockStore({ [`${PK_BOB}.1`]: privateObj })
+      const remote = createUnreachableStore()
+      const sync = createSyncStore({ local, remote, activePubkey: PK_ALICE, sharedRealms: [] })
+
+      const result = await sync.get(`${PK_BOB}.1`)
+      assert.equal(result, null, 'should not leak Bob\'s private object to Alice')
+    })
+
+    it('filters out objects from other identity realms (hub 304)', async () => {
+      const privateObj = makeObj(`${PK_BOB}.1`, 1, [PK_BOB])
+      const local = createMockStore({ [`${PK_BOB}.1`]: privateObj })
+      const remote = createMockHubStore({ [`${PK_BOB}.1`]: privateObj }) // same rev → 304
+      const sync = createSyncStore({ local, remote, activePubkey: PK_ALICE, sharedRealms: [] })
+
+      const result = await sync.get(`${PK_BOB}.1`)
+      assert.equal(result, null, 'should not leak on 304 path')
+    })
+
+    it('filters out objects from other identity realms (hub 404, local fallback)', async () => {
+      const privateObj = makeObj(`${PK_BOB}.1`, 1, [PK_BOB])
+      const local = createMockStore({ [`${PK_BOB}.1`]: privateObj })
+      const remote = createMockHubStore({}) // hub doesn't have it → 404
+      const sync = createSyncStore({ local, remote, activePubkey: PK_ALICE, sharedRealms: [] })
+
+      const result = await sync.get(`${PK_BOB}.1`)
+      assert.equal(result, null, 'should not leak on 404+local fallback path')
+    })
+
+    it('filters out on local-revision-wins path', async () => {
+      const privateObj = makeObj(`${PK_BOB}.1`, 5, [PK_BOB])
+      const local = createMockStore({ [`${PK_BOB}.1`]: privateObj })
+      const remote = createMockHubStore({ [`${PK_BOB}.1`]: makeObj(`${PK_BOB}.1`, 3, [PK_BOB]) })
+      const sync = createSyncStore({ local, remote, activePubkey: PK_ALICE, sharedRealms: [] })
+
+      const result = await sync.get(`${PK_BOB}.1`)
+      assert.equal(result, null, 'should not leak when local revision wins')
+    })
+
+    it('allows own identity realm objects', async () => {
+      const myObj = makeObj(`${PK_ALICE}.1`, 1, [PK_ALICE])
+      const local = createMockStore({ [`${PK_ALICE}.1`]: myObj })
+      const remote = createUnreachableStore()
+      const sync = createSyncStore({ local, remote, activePubkey: PK_ALICE, sharedRealms: [] })
+
+      const result = await sync.get(`${PK_ALICE}.1`)
+      assert.ok(result, 'should return own identity realm object')
+    })
+
+    it('allows shared realm objects for members', async () => {
+      const sharedRealm = `${PK_BOB}.Team`
+      const obj = makeObj(`${PK_BOB}.1`, 1, [sharedRealm])
+      const local = createMockStore({ [`${PK_BOB}.1`]: obj })
+      const remote = createUnreachableStore()
+      const sync = createSyncStore({ local, remote, activePubkey: PK_ALICE, sharedRealms: [sharedRealm] })
+
+      const result = await sync.get(`${PK_BOB}.1`)
+      assert.ok(result, 'should return shared realm object for members')
+    })
+
+    it('skipRealmCheck bypasses filtering', async () => {
+      const privateObj = makeObj(`${PK_BOB}.1`, 1, [PK_BOB])
+      const local = createMockStore({ [`${PK_BOB}.1`]: privateObj })
+      const remote = createUnreachableStore()
+      const sync = createSyncStore({ local, remote, activePubkey: PK_ALICE, sharedRealms: [] })
+
+      const result = await sync.get(`${PK_BOB}.1`, { skipRealmCheck: true })
+      assert.ok(result, 'skipRealmCheck should bypass filtering')
+    })
+
+    it('setRealmContext updates filtering after creation', async () => {
+      const privateObj = makeObj(`${PK_BOB}.1`, 1, [PK_BOB])
+      const local = createMockStore({ [`${PK_BOB}.1`]: privateObj })
+      const remote = createUnreachableStore()
+      const sync = createSyncStore({ local, remote })
+
+      // No pubkey set — no filtering
+      const before = await sync.get(`${PK_BOB}.1`)
+      assert.ok(before, 'should return when no pubkey set (no filtering)')
+
+      // Set context — now filtered
+      sync.setRealmContext(PK_ALICE, [])
+      const after = await sync.get(`${PK_BOB}.1`)
+      assert.equal(after, null, 'should filter after setRealmContext')
+    })
+  })
 })

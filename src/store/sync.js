@@ -88,9 +88,17 @@ export function createSyncStore({ local, remote, activePubkey = null, sharedReal
     }
   }
 
+  /** Apply realm filter to a result before returning to caller. */
+  function applyFilter(obj, opts) {
+    if (!obj || opts?.skipRealmCheck) return obj
+    if (!_activePubkey) return obj  // no identity → no filtering
+    return isVisible(obj, _activePubkey, _sharedRealms) ? obj : null
+  }
+
   return {
     async get(ref, opts = {}) {
-      // Internal reads always skip realm check — filtering happens on return
+      // Internal reads skip realm check to get revision for ETag comparison.
+      // applyFilter() is called on every return path to enforce visibility.
       let localObj = null
       try { localObj = await local.get(ref, { skipRealmCheck: true }) } catch { /* ok */ }
       const localRev = localObj?.item?.revision
@@ -101,12 +109,12 @@ export function createSyncStore({ local, remote, activePubkey = null, sharedReal
         remoteResult = await remote.get(ref, { localRevision: localRev })
       } catch {
         // Hub unreachable — fall back to local
-        return localObj
+        return applyFilter(localObj, opts)
       }
 
       // 304 Not Modified — local is current
       if (remoteResult?._notModified) {
-        return localObj
+        return applyFilter(localObj, opts)
       }
 
       // Hub returned an object
@@ -118,26 +126,26 @@ export function createSyncStore({ local, remote, activePubkey = null, sharedReal
           if (remoteRev > lRev) {
             // Hub is newer — cache locally
             cacheLocally(remoteResult)
-            return remoteResult
+            return applyFilter(remoteResult, opts)
           }
           if (lRev > remoteRev) {
             // Local is newer — push to hub
             pushToRemote(localObj)
-            return localObj
+            return applyFilter(localObj, opts)
           }
           // Same revision — prefer local (already have it)
-          return localObj
+          return applyFilter(localObj, opts)
         }
 
         // Hub only — cache locally
         cacheLocally(remoteResult)
-        return remoteResult
+        return applyFilter(remoteResult, opts)
       }
 
       // Hub returned null (404) — serve local if we have it, and push
       if (localObj) {
         pushToRemote(localObj)
-        return localObj
+        return applyFilter(localObj, opts)
       }
 
       return null
@@ -277,6 +285,12 @@ export function createSyncStore({ local, remote, activePubkey = null, sharedReal
     /** Get current shared realm memberships. */
     getSharedRealms() {
       return _sharedRealms
+    },
+
+    /** Update realm filter context (call after identity is resolved). */
+    setRealmContext(pubkey, realms) {
+      if (pubkey !== undefined) _activePubkey = pubkey
+      if (realms !== undefined) _sharedRealms = realms
     },
 
     setToken(t) {

@@ -238,9 +238,10 @@ async function makeClient(overrides = {}) {
   const savedToken = overrides.token ?? readConfig(configDir, 'auth-token', null)
 
   // Load shared realm cache (1h TTL)
+  // Note: actual pubkey matching happens after identity is resolved (below)
   const REALM_CACHE_TTL_MS = 60 * 60 * 1000
   const srCache = loadSharedRealms(configDir)
-  let sharedRealms = srCache?.realms || []
+  let sharedRealms = [] // populated after identity is resolved, if cache pubkey matches
   const cacheExpired = srCache?.fetched_at
     ? (Date.now() - new Date(srCache.fetched_at).getTime()) > REALM_CACHE_TTL_MS
     : true
@@ -289,6 +290,15 @@ async function makeClient(overrides = {}) {
 
   // Activate realm filter now that identity is resolved
   filterState.pubkey = client.pubkey
+  // Only use cached shared realms if they belong to the active identity
+  if (srCache?.pubkey && srCache.pubkey === client.pubkey) {
+    sharedRealms = srCache.realms || []
+    filterState.realms = sharedRealms
+  }
+  // Update sync store's realm context for its own filtering
+  if (store.setRealmContext) {
+    store.setRealmContext(client.pubkey, sharedRealms)
+  }
 
   // Auto-authenticate if requested (e.g. ig get --identity)
   if (overrides.authenticate && isOnline && hub) {
