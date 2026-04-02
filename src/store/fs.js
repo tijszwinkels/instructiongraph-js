@@ -59,7 +59,7 @@ function applyCursor(items, cursor) {
  * @param {string} opts.dataDir - directory for object files
  * @returns {import('../types.js').Store}
  */
-export function createFsStore({ dataDir }) {
+export function createFsStore({ dataDir, filter = null }) {
   mkdirSync(dataDir, { recursive: true })
 
   function filePath(ref) {
@@ -117,8 +117,10 @@ export function createFsStore({ dataDir }) {
   }
 
   return {
-    async get(ref) {
-      return readObj(filePath(ref))
+    async get(ref, opts = {}) {
+      const obj = readObj(filePath(ref))
+      if (obj && filter && !opts.skipRealmCheck && !filter(obj)) return null
+      return obj
     },
 
     async put(signedObj) {
@@ -173,6 +175,7 @@ export function createFsStore({ dataDir }) {
     async search(query = {}) {
       const all = listAll()
       const filtered = all.filter(obj => {
+        if (filter && !query.skipRealmCheck && !filter(obj)) return false
         if (query.type && obj.item.type !== query.type) return false
         if (query.by && obj.item.pubkey !== query.by) return false
         return true
@@ -184,6 +187,7 @@ export function createFsStore({ dataDir }) {
       const all = listAll()
       const filtered = all.filter(obj => {
         if (!obj.item?.relations) return false
+        if (filter && !opts.skipRealmCheck && !filter(obj)) return false
         if (opts.type && obj.item.type !== opts.type) return false
         if (opts.from && obj.item.pubkey !== opts.from) return false
 

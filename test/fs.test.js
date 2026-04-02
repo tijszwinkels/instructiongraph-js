@@ -195,3 +195,77 @@ describe('fs store', () => {
     assert.equal(result.items[0].item.id, 'comment-id')
   })
 })
+
+describe('fs store with realm filter', () => {
+  let dataDir
+  let store
+  const PK = 'AliceAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA'
+
+  beforeEach(() => {
+    dataDir = join(tmpdir(), `ig-fs-filter-test-${Date.now()}`)
+    mkdirSync(dataDir, { recursive: true })
+    store = createFsStore({
+      dataDir,
+      filter: (obj) => {
+        const realms = obj?.item?.in || []
+        return realms.includes('dataverse001') || realms.includes(PK)
+      }
+    })
+  })
+
+  afterEach(() => {
+    rmSync(dataDir, { recursive: true, force: true })
+  })
+
+  async function makeSignedObj(overrides = {}) {
+    const kp = await generateKeypair()
+    const item = buildItem({
+      pubkey: kp.pubkey,
+      type: 'TEST',
+      content: { title: 'Test' },
+      ...overrides
+    })
+    const signature = await sign(kp.privateKey, item)
+    return { is: 'instructionGraph001', signature, item, _kp: kp }
+  }
+
+  it('get returns null for filtered objects', async () => {
+    const obj = await makeSignedObj({ in: ['other-realm'] })
+    await store.put(obj)
+    const result = await store.get(obj.item.ref)
+    assert.equal(result, null)
+  })
+
+  it('get returns object when realm matches', async () => {
+    const obj = await makeSignedObj({ in: ['dataverse001'] })
+    await store.put(obj)
+    const result = await store.get(obj.item.ref)
+    assert.ok(result)
+  })
+
+  it('get with skipRealmCheck bypasses filter', async () => {
+    const obj = await makeSignedObj({ in: ['other-realm'] })
+    await store.put(obj)
+    const result = await store.get(obj.item.ref, { skipRealmCheck: true })
+    assert.ok(result)
+  })
+
+  it('search excludes filtered objects', async () => {
+    const visible = await makeSignedObj({ in: ['dataverse001'] })
+    const hidden = await makeSignedObj({ in: ['other-realm'] })
+    await store.put(visible)
+    await store.put(hidden)
+    const result = await store.search({})
+    assert.equal(result.items.length, 1)
+    assert.equal(result.items[0].item.ref, visible.item.ref)
+  })
+
+  it('search with skipRealmCheck includes all', async () => {
+    const visible = await makeSignedObj({ in: ['dataverse001'] })
+    const hidden = await makeSignedObj({ in: ['other-realm'] })
+    await store.put(visible)
+    await store.put(hidden)
+    const result = await store.search({ skipRealmCheck: true })
+    assert.equal(result.items.length, 2)
+  })
+})

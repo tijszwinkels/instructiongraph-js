@@ -102,8 +102,8 @@ export function createClient(opts = {}) {
 
     // ─── Read operations ───────────────────────────
 
-    async get(ref) {
-      return store.get(ref)
+    async get(ref, getOpts = {}) {
+      return store.get(ref, getOpts)
     },
 
     async search(query) {

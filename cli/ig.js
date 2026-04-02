@@ -24,6 +24,7 @@ import { createClient } from '../src/client.js'
 import { createHubStore } from '../src/store/hub.js'
 import { createFsStore } from '../src/store/fs.js'
 import { createSyncStore } from '../src/store/sync.js'
+import { isVisible, loadSharedRealms } from '../src/store/realm-filter.js'
 import { generateKeypair } from '../src/crypto.js'
 
 const args = process.argv.slice(2)
@@ -63,8 +64,9 @@ Usage:
 Commands:
   ig status                        Show full configuration status
   ig get <ref> [--identity N]      Fetch object (auth as identity for private)
-  ig search [options]              Search objects
-  ig inbound <ref> [options]       Inbound relations
+                [--raw]             Skip realm filtering
+  ig search [options]              Search objects (--raw to skip realm filter)
+  ig inbound <ref> [options]       Inbound relations (--raw to skip realm filter)
   ig verify <file.json>            Verify signature
   ig sign <spec.json>              Sign spec, print envelope
   ig create <spec.json> [options]  Sign and publish
@@ -220,6 +222,7 @@ function listIdentityNames(configDir) {
  * @param {string} [overrides.realm] - Override the default realm
  * @param {string} [overrides.token] - Override the auth token
  * @param {boolean} [overrides.authenticate] - Authenticate with hub on connect
+ * @param {boolean} [overrides.skipRealmCheck] - Disable realm filtering (--raw)
  */
 async function makeClient(overrides = {}) {
   const configDir = findConfigDir()
@@ -235,11 +238,22 @@ async function makeClient(overrides = {}) {
   // Load persisted auth token if available
   const savedToken = overrides.token ?? readConfig(configDir, 'auth-token', null)
 
+  // Load shared realm cache
+  const srCache = loadSharedRealms(configDir)
+  let sharedRealms = srCache?.realms || []
+
+  // Realm filter: uses mutable state, resolved after identity loads
+  const filterState = { pubkey: null, realms: sharedRealms, enabled: !overrides.skipRealmCheck }
+  const realmFilter = (obj) => {
+    if (!filterState.enabled || !filterState.pubkey) return true
+    return isVisible(obj, filterState.pubkey, filterState.realms)
+  }
+
   if (hubUrl && hasLocal) {
     // Both: sync store (local primary, hub sync)
-    const local = createFsStore({ dataDir })
+    const local = createFsStore({ dataDir, filter: realmFilter })
     hub = createHubStore({ url: hubUrl, token: savedToken })
-    store = createSyncStore({ local, remote: hub })
+    store = createSyncStore({ local, remote: hub, sharedRealms, configDir })
     isOnline = true
   } else if (hubUrl) {
     // Hub only (no local data dir yet)
@@ -248,7 +262,7 @@ async function makeClient(overrides = {}) {
     isOnline = true
   } else if (hasLocal) {
     // Local only (offline mode)
-    store = createFsStore({ dataDir })
+    store = createFsStore({ dataDir, filter: realmFilter })
   } else {
     // Nothing configured
     die(
@@ -270,11 +284,16 @@ async function makeClient(overrides = {}) {
   const client = createClient({ store, identity, defaultRealm })
   if (identity) await client.ready
 
+  // Activate realm filter now that identity is resolved
+  filterState.pubkey = client.pubkey
+
   // Auto-authenticate if requested (e.g. ig get --identity)
   if (overrides.authenticate && isOnline && hub) {
     if (!client.signer) die('Cannot authenticate — no identity configured.')
     const authResult = await client.authenticate()
     if (!authResult.ok) die(`Authentication failed for identity: ${overrides.identityName || 'active'}`)
+    // Update realm filter with fresh shared realms from hub
+    if (authResult.sharedRealms) filterState.realms = authResult.sharedRealms
   }
 
   return { client, configDir, isOnline, hubUrl, hub, store }
@@ -808,7 +827,8 @@ async function main() {
       if (!ref) die('Usage: ig get <ref>')
 
       const identityName = flag('identity')
-      const ctx = await makeClient({ identityName, authenticate: !!identityName })
+      const raw = args.includes('--raw')
+      const ctx = await makeClient({ identityName, authenticate: !!identityName, skipRealmCheck: raw })
       const obj = await ctx.client.get(ref)
       if (!obj) die(`Not found: ${ref}`)
       console.log(JSON.stringify(obj, null, 2))
@@ -816,7 +836,8 @@ async function main() {
     }
 
     case 'search': {
-      const ctx = await makeClient()
+      const raw = args.includes('--raw')
+      const ctx = await makeClient({ skipRealmCheck: raw })
       const result = await ctx.client.search({
         type: flag('type'),
         by: flag('by'),
@@ -844,7 +865,8 @@ async function main() {
     case 'inbound': {
       const ref = args[1]
       if (!ref) die('Usage: ig inbound <ref>')
-      const ctx = await makeClient()
+      const raw = args.includes('--raw')
+      const ctx = await makeClient({ skipRealmCheck: raw })
       const result = await ctx.client.inbound(ref, {
         relation: flag('relation'),
         type: flag('type'),
