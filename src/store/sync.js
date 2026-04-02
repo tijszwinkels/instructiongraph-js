@@ -11,7 +11,7 @@
  *                 Cache all hub results locally.
  */
 
-import { readFileSync, writeFileSync, mkdirSync } from 'node:fs'
+import { writeFileSync, mkdirSync } from 'node:fs'
 import { join } from 'node:path'
 import { isVisible } from './realm-filter.js'
 

@@ -291,7 +291,8 @@ async function makeClient(overrides = {}) {
   // Activate realm filter now that identity is resolved
   filterState.pubkey = client.pubkey
   // Only use cached shared realms if they belong to the active identity
-  if (srCache?.pubkey && srCache.pubkey === client.pubkey) {
+  // AND the cache is still fresh (1h TTL).
+  if (srCache?.pubkey && srCache.pubkey === client.pubkey && !cacheExpired) {
     sharedRealms = srCache.realms || []
     filterState.realms = sharedRealms
   }
@@ -300,37 +301,20 @@ async function makeClient(overrides = {}) {
     store.setRealmContext(client.pubkey, sharedRealms)
   }
 
-  // Auto-authenticate if requested (e.g. ig get --identity)
+  // Auto-authenticate if requested (e.g. ig get --identity).
+  // This is the only safe time to refresh shared realms, because we know
+  // the token was minted for the active identity in this session.
   if (overrides.authenticate && isOnline && hub) {
     if (!client.signer) die('Cannot authenticate — no identity configured.')
     const authResult = await client.authenticate()
     if (!authResult.ok) die(`Authentication failed for identity: ${overrides.identityName || 'active'}`)
-    // Update realm filter with fresh shared realms from hub
-    if (authResult.sharedRealms) filterState.realms = authResult.sharedRealms
-  }
-
-  // Refresh shared realms if cache expired and we have auth
-  if (cacheExpired && isOnline && hub && savedToken) {
-    try {
-      const res = await fetch(`${hubUrl}/auth/realms`, {
-        headers: { Authorization: `Bearer ${savedToken}` }
-      })
-      if (res.ok) {
-        const data = await res.json()
-        const realms = data.realms || []
-        filterState.realms = realms
-        sharedRealms = realms
-        // Persist
-        const { writeFileSync: wf, mkdirSync: md } = await import('node:fs')
-        const cfgDir = join(configDir, 'config')
-        md(cfgDir, { recursive: true })
-        wf(join(cfgDir, 'shared-realms.json'), JSON.stringify({
-          pubkey: client.pubkey,
-          realms,
-          fetched_at: new Date().toISOString()
-        }, null, 2) + '\n')
+    if (authResult.sharedRealms) {
+      sharedRealms = authResult.sharedRealms
+      filterState.realms = authResult.sharedRealms
+      if (store.setRealmContext) {
+        store.setRealmContext(client.pubkey, authResult.sharedRealms)
       }
-    } catch { /* best effort — use stale cache */ }
+    }
   }
 
   return { client, configDir, isOnline, hubUrl, hub, store }
