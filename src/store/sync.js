@@ -11,15 +11,38 @@
  *                 Cache all hub results locally.
  */
 
+import { writeFileSync, mkdirSync } from 'node:fs'
+import { join } from 'node:path'
+import { isVisible } from './realm-filter.js'
+
 /**
  * Create a sync store that mirrors hub proxy behavior.
  *
  * @param {object} opts
  * @param {import('../types.js').Store} opts.local  - filesystem store
  * @param {import('../types.js').Store} opts.remote - hub store (must support get(ref, {localRevision}))
+ * @param {string} [opts.activePubkey] - active identity pubkey for realm filtering
+ * @param {string[]} [opts.sharedRealms] - shared realm memberships (loaded from cache)
+ * @param {string} [opts.configDir] - config directory for caching shared realms
  * @returns {import('../types.js').Store}
  */
-export function createSyncStore({ local, remote }) {
+export function createSyncStore({ local, remote, activePubkey = null, sharedRealms = null, configDir = null }) {
+  let _sharedRealms = sharedRealms || []
+  let _activePubkey = activePubkey
+
+  /** Save shared realm memberships to disk cache. */
+  function saveSharedRealms(pubkey, realms) {
+    if (!configDir) return
+    try {
+      mkdirSync(join(configDir, 'config'), { recursive: true })
+      writeFileSync(
+        join(configDir, 'config', 'shared-realms.json'),
+        JSON.stringify({ pubkey, realms, fetched_at: new Date().toISOString() }, null, 2) + '\n'
+      )
+    } catch (e) {
+      console.warn(`[sync] Failed to save shared realms: ${e.message}`)
+    }
+  }
 
   /**
    * Check if an object has any identity-realm (non-public) realm membership.
@@ -65,11 +88,19 @@ export function createSyncStore({ local, remote }) {
     }
   }
 
+  /** Apply realm filter to a result before returning to caller. */
+  function applyFilter(obj, opts) {
+    if (!obj || opts?.skipRealmCheck) return obj
+    if (!_activePubkey) return obj  // no identity → no filtering
+    return isVisible(obj, _activePubkey, _sharedRealms) ? obj : null
+  }
+
   return {
-    async get(ref) {
-      // Get local revision for ETag
+    async get(ref, opts = {}) {
+      // Internal reads skip realm check to get revision for ETag comparison.
+      // applyFilter() is called on every return path to enforce visibility.
       let localObj = null
-      try { localObj = await local.get(ref) } catch { /* ok */ }
+      try { localObj = await local.get(ref, { skipRealmCheck: true }) } catch { /* ok */ }
       const localRev = localObj?.item?.revision
 
       // Ask hub with ETag (conditional request)
@@ -78,12 +109,12 @@ export function createSyncStore({ local, remote }) {
         remoteResult = await remote.get(ref, { localRevision: localRev })
       } catch {
         // Hub unreachable — fall back to local
-        return localObj
+        return applyFilter(localObj, opts)
       }
 
       // 304 Not Modified — local is current
       if (remoteResult?._notModified) {
-        return localObj
+        return applyFilter(localObj, opts)
       }
 
       // Hub returned an object
@@ -95,26 +126,26 @@ export function createSyncStore({ local, remote }) {
           if (remoteRev > lRev) {
             // Hub is newer — cache locally
             cacheLocally(remoteResult)
-            return remoteResult
+            return applyFilter(remoteResult, opts)
           }
           if (lRev > remoteRev) {
             // Local is newer — push to hub
             pushToRemote(localObj)
-            return localObj
+            return applyFilter(localObj, opts)
           }
           // Same revision — prefer local (already have it)
-          return localObj
+          return applyFilter(localObj, opts)
         }
 
         // Hub only — cache locally
         cacheLocally(remoteResult)
-        return remoteResult
+        return applyFilter(remoteResult, opts)
       }
 
       // Hub returned null (404) — serve local if we have it, and push
       if (localObj) {
         pushToRemote(localObj)
-        return localObj
+        return applyFilter(localObj, opts)
       }
 
       return null
@@ -181,7 +212,7 @@ export function createSyncStore({ local, remote }) {
      */
     async pushAll(opts = {}) {
       const { onProgress, realms } = opts
-      const allLocal = await local.search({ limit: 100000 })
+      const allLocal = await local.search({ limit: 100000, skipRealmCheck: true })
       const items = allLocal.items || []
       const total = items.length
       let pushed = 0
@@ -230,7 +261,14 @@ export function createSyncStore({ local, remote }) {
       if (typeof remote.authenticate !== 'function') {
         throw new Error('Remote store does not support authenticate()')
       }
-      return remote.authenticate(signer)
+      const result = await remote.authenticate(signer)
+      // Update shared realm cache from auth response
+      if (result.sharedRealms) {
+        _sharedRealms = result.sharedRealms
+        _activePubkey = signer.pubkey
+        saveSharedRealms(signer.pubkey, result.sharedRealms)
+      }
+      return result
     },
 
     async logout() {
@@ -242,6 +280,17 @@ export function createSyncStore({ local, remote }) {
 
     getToken() {
       return typeof remote.getToken === 'function' ? remote.getToken() : null
+    },
+
+    /** Get current shared realm memberships. */
+    getSharedRealms() {
+      return _sharedRealms
+    },
+
+    /** Update realm filter context (call after identity is resolved). */
+    setRealmContext(pubkey, realms) {
+      if (pubkey !== undefined) _activePubkey = pubkey
+      if (realms !== undefined) _sharedRealms = realms
     },
 
     setToken(t) {

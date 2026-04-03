@@ -24,6 +24,7 @@ import { createClient } from '../src/client.js'
 import { createHubStore } from '../src/store/hub.js'
 import { createFsStore } from '../src/store/fs.js'
 import { createSyncStore } from '../src/store/sync.js'
+import { isVisible, loadSharedRealms } from '../src/store/realm-filter.js'
 import { generateKeypair } from '../src/crypto.js'
 
 const args = process.argv.slice(2)
@@ -91,9 +92,9 @@ Run 'ig <command> --help' for command-specific help.`)
 
 function commandUsage(command) {
   const docs = {
-    get: `Usage: ig get <ref> [--identity N]\n\nFetch an object by ref and print its JSON envelope.\n\nFlags:\n  --identity N  Authenticate as identity N to access private objects`,
-    search: `Usage: ig search [--type T] [--by PK] [--limit N] [--cursor C] [--counts] [--json]\n\nSearch objects on the configured hub/store.\n\nFlags:\n  --type T     Filter by object type\n  --by PK      Filter by pubkey\n  --limit N    Max results (default: 20)\n  --cursor C   Pagination cursor from previous result\n  --counts     Include inbound relation counts\n  --json       Output raw JSON array`,
-    inbound: `Usage: ig inbound <ref> [--relation R] [--type T] [--from PK] [--limit N] [--cursor C] [--counts] [--json]\n\nList objects that point to the target ref.\n\nFlags:\n  --relation R  Filter by relation name\n  --type T      Filter by source object type\n  --from PK     Filter by source object pubkey\n  --limit N     Max results (default: 20)\n  --cursor C    Pagination cursor from previous result\n  --counts      Include inbound relation counts\n  --json        Output raw JSON array`,
+    get: `Usage: ig get <ref> [--identity N] [--raw]\n\nFetch an object by ref and print its JSON envelope.\n\nFlags:\n  --identity N  Authenticate as identity N to access private objects\n  --raw         Skip realm filtering (show objects from any realm)`,
+    search: `Usage: ig search [--type T] [--by PK] [--limit N] [--cursor C] [--counts] [--json] [--raw]\n\nSearch objects on the configured hub/store.\n\nFlags:\n  --type T     Filter by object type\n  --by PK      Filter by pubkey\n  --limit N    Max results (default: 20)\n  --cursor C   Pagination cursor from previous result\n  --counts     Include inbound relation counts\n  --json       Output raw JSON array\n  --raw        Skip realm filtering (show objects from any realm)`,
+    inbound: `Usage: ig inbound <ref> [--relation R] [--type T] [--from PK] [--limit N] [--cursor C] [--counts] [--json] [--raw]\n\nList objects that point to the target ref.\n\nFlags:\n  --relation R  Filter by relation name\n  --type T      Filter by source object type\n  --from PK     Filter by source object pubkey\n  --limit N     Max results (default: 20)\n  --cursor C    Pagination cursor from previous result\n  --counts      Include inbound relation counts\n  --json        Output raw JSON array\n  --raw         Skip realm filtering (show objects from any realm)`,
     verify: `Usage: ig verify <file.json>\n\nVerify an instructionGraph001 envelope on disk.`,
     sign: `Usage: ig sign <spec.json>\n\nBuild and sign a spec, then print the canonical envelope JSON.`,
     create: `Usage: ig create <spec.json> [--update] [--identity N] [--realm R] [--push] [--no-push]\n\nBuild, sign, and publish a spec to the configured store.\n\nSpec format (JSON):\n  All fields are optional. Auto-filled: id, pubkey, ref, in, created_at,\n  relations.author. Recommended:\n    type         Object type (e.g. POST, NOTE, COMMENT)\n    name         Short human-readable label\n    instruction  How agents should interpret/display this object\n    content      Free-form payload (e.g. { "title": "...", "body": "..." })\n  Other fields:\n    id           UUID (auto-generated if omitted)\n    in           Realm array (default: your active realm)\n    relations    Named arrays of { ref } links to other objects\n    rights       { license, ai_training_allowed }\n\n  The instruction field is key — it makes objects self-describing so any\n  agent (human or LLM) can understand them without external docs.\n\n  If using a type, add a type_def relation so the schema is validated:\n    "relations": { "type_def": [{ "ref": "<pubkey>.<type-uuid>" }] }\n\n  Structural objects should include a root relation for discoverability:\n    "relations": { "root": [{ "ref": "AxyU5_...00000000-...",\n      "url": "https://dataverse001.net/AxyU5_...00000000-..." }] }\n\nExample:\n  {\n    "type": "POST",\n    "name": "Hello",\n    "instruction": "A post. Display title and body.",\n    "content": { "title": "Hello!", "body": "First post!" }\n  }\n\nFlags:\n  --update      Allow updating existing objects (auto-increments revision,\n                sets updated_at). Without this, fails if object exists.\n  --identity N  Sign with identity N instead of active identity\n  --realm R     Override default realm (e.g. dataverse001, identity)\n  --push        Push to server (auto-login if needed for identity realm)\n  --no-push     Store locally only, skip server push`,
@@ -220,6 +221,7 @@ function listIdentityNames(configDir) {
  * @param {string} [overrides.realm] - Override the default realm
  * @param {string} [overrides.token] - Override the auth token
  * @param {boolean} [overrides.authenticate] - Authenticate with hub on connect
+ * @param {boolean} [overrides.skipRealmCheck] - Disable realm filtering (--raw)
  */
 async function makeClient(overrides = {}) {
   const configDir = findConfigDir()
@@ -235,11 +237,27 @@ async function makeClient(overrides = {}) {
   // Load persisted auth token if available
   const savedToken = overrides.token ?? readConfig(configDir, 'auth-token', null)
 
+  // Load shared realm cache (1h TTL)
+  // Note: actual pubkey matching happens after identity is resolved (below)
+  const REALM_CACHE_TTL_MS = 60 * 60 * 1000
+  const srCache = loadSharedRealms(configDir)
+  let sharedRealms = [] // populated after identity is resolved, if cache pubkey matches
+  const cacheExpired = srCache?.fetched_at
+    ? (Date.now() - new Date(srCache.fetched_at).getTime()) > REALM_CACHE_TTL_MS
+    : true
+
+  // Realm filter: uses mutable state, resolved after identity loads
+  const filterState = { pubkey: null, realms: sharedRealms, enabled: !overrides.skipRealmCheck }
+  const realmFilter = (obj) => {
+    if (!filterState.enabled || !filterState.pubkey) return true
+    return isVisible(obj, filterState.pubkey, filterState.realms)
+  }
+
   if (hubUrl && hasLocal) {
     // Both: sync store (local primary, hub sync)
-    const local = createFsStore({ dataDir })
+    const local = createFsStore({ dataDir, filter: realmFilter })
     hub = createHubStore({ url: hubUrl, token: savedToken })
-    store = createSyncStore({ local, remote: hub })
+    store = createSyncStore({ local, remote: hub, sharedRealms, configDir })
     isOnline = true
   } else if (hubUrl) {
     // Hub only (no local data dir yet)
@@ -248,7 +266,7 @@ async function makeClient(overrides = {}) {
     isOnline = true
   } else if (hasLocal) {
     // Local only (offline mode)
-    store = createFsStore({ dataDir })
+    store = createFsStore({ dataDir, filter: realmFilter })
   } else {
     // Nothing configured
     die(
@@ -270,11 +288,33 @@ async function makeClient(overrides = {}) {
   const client = createClient({ store, identity, defaultRealm })
   if (identity) await client.ready
 
-  // Auto-authenticate if requested (e.g. ig get --identity)
+  // Activate realm filter now that identity is resolved
+  filterState.pubkey = client.pubkey
+  // Only use cached shared realms if they belong to the active identity
+  // AND the cache is still fresh (1h TTL).
+  if (srCache?.pubkey && srCache.pubkey === client.pubkey && !cacheExpired) {
+    sharedRealms = srCache.realms || []
+    filterState.realms = sharedRealms
+  }
+  // Update sync store's realm context for its own filtering
+  if (store.setRealmContext) {
+    store.setRealmContext(client.pubkey, sharedRealms)
+  }
+
+  // Auto-authenticate if requested (e.g. ig get --identity).
+  // This is the only safe time to refresh shared realms, because we know
+  // the token was minted for the active identity in this session.
   if (overrides.authenticate && isOnline && hub) {
     if (!client.signer) die('Cannot authenticate — no identity configured.')
     const authResult = await client.authenticate()
     if (!authResult.ok) die(`Authentication failed for identity: ${overrides.identityName || 'active'}`)
+    if (authResult.sharedRealms) {
+      sharedRealms = authResult.sharedRealms
+      filterState.realms = authResult.sharedRealms
+      if (store.setRealmContext) {
+        store.setRealmContext(client.pubkey, authResult.sharedRealms)
+      }
+    }
   }
 
   return { client, configDir, isOnline, hubUrl, hub, store }
@@ -808,7 +848,8 @@ async function main() {
       if (!ref) die('Usage: ig get <ref>')
 
       const identityName = flag('identity')
-      const ctx = await makeClient({ identityName, authenticate: !!identityName })
+      const raw = args.includes('--raw')
+      const ctx = await makeClient({ identityName, authenticate: !!identityName, skipRealmCheck: raw })
       const obj = await ctx.client.get(ref)
       if (!obj) die(`Not found: ${ref}`)
       console.log(JSON.stringify(obj, null, 2))
@@ -816,7 +857,8 @@ async function main() {
     }
 
     case 'search': {
-      const ctx = await makeClient()
+      const raw = args.includes('--raw')
+      const ctx = await makeClient({ skipRealmCheck: raw })
       const result = await ctx.client.search({
         type: flag('type'),
         by: flag('by'),
@@ -844,7 +886,8 @@ async function main() {
     case 'inbound': {
       const ref = args[1]
       if (!ref) die('Usage: ig inbound <ref>')
-      const ctx = await makeClient()
+      const raw = args.includes('--raw')
+      const ctx = await makeClient({ skipRealmCheck: raw })
       const result = await ctx.client.inbound(ref, {
         relation: flag('relation'),
         type: flag('type'),

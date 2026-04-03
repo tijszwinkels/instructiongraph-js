@@ -162,7 +162,18 @@ export function createHubStore({ url, token = null }) {
       if (!res.ok) throw new Error(`Token exchange failed: ${res.status}`)
       const data = await res.json()
       bearerToken = data.token
-      return { ok: true, ...data }
+
+      // Fetch shared realm memberships
+      let sharedRealms = []
+      try {
+        const realmsRes = await fetch(`${baseUrl}/auth/realms`, { headers: headers() })
+        if (realmsRes.ok) {
+          const realmsData = await realmsRes.json()
+          sharedRealms = realmsData.realms || []
+        }
+      } catch { /* best effort */ }
+
+      return { ok: true, sharedRealms, ...data }
     },
 
     /**
