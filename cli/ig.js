@@ -975,10 +975,12 @@ async function main() {
 
       if (forcePush && noPush) die('Cannot use both --push and --no-push')
 
-      const ctx = await makeClient({ identityName, realm })
-      printStatus(ctx)
-
       const spec = JSON.parse(readFileSync(resolve(file), 'utf-8'))
+
+      // If spec explicitly targets local realm, ensure makeClient uses a local-capable store
+      const effectiveLocalRealm = realm === 'local' || (spec.in && spec.in.includes('local'))
+      const ctx = await makeClient({ identityName, realm: effectiveLocalRealm ? 'local' : realm })
+      printStatus(ctx)
 
       // Pre-check: can't target someone else's identity realm
       const specRealms = spec.in || []

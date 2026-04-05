@@ -666,6 +666,42 @@ describe('CLI', () => {
       await access(localPath)
     })
 
+    it('ig create with explicit in:[local] works in hub-only mode (no data dir)', async () => {
+      // Fresh project: hub configured, NO data/ dir, default realm is NOT local
+      const freshDir = await mkdtemp(join(tmpdir(), 'ig-explicit-local-test-'))
+      const igDir = join(freshDir, '.instructionGraph')
+      await mkdir(join(igDir, 'config'), { recursive: true })
+      await mkdir(join(igDir, 'identities', 'default'), { recursive: true })
+      await writeFile(join(igDir, 'config', 'hub-url'), hub.url)
+      await writeFile(join(igDir, 'config', 'active-identity'), 'default')
+      await writeFile(join(igDir, 'config', 'default-realm'), 'dataverse001')
+
+      const pem = generateKeyPairSync('ec', { namedCurve: 'prime256v1' })
+        .privateKey.export({ format: 'pem', type: 'pkcs8' }).toString()
+      await writeFile(join(igDir, 'identities', 'default', 'private.pem'), pem)
+
+      function igFresh(...a) {
+        return execFile('node', [CLI, ...a], {
+          cwd: freshDir,
+          env: { ...process.env, INSTRUCTIONGRAPH_DIR: igDir }
+        })
+      }
+
+      const hubSizeBefore = stored.size
+      const specPath = join(freshDir, 'local-spec.json')
+      await writeFile(specPath, JSON.stringify({ type: 'NOTE', in: ['local'], content: { text: 'explicit-local' } }))
+      const { stdout } = await igFresh('create', specPath)
+      const ref = stdout.trim().split('\n').pop()
+      assert.ok(ref.includes('.'), 'should return a ref')
+      assert.equal(stored.size, hubSizeBefore, 'should NOT push to hub')
+
+      // Should exist on local filesystem
+      const localPath = join(igDir, 'data', `${ref}.json`)
+      await access(localPath)
+
+      await rm(freshDir, { recursive: true })
+    })
+
     it('ig create --realm local: never reaches hub even with data dir', async () => {
       const hubSizeBefore = stored.size
       const specPath = join(projectDir, 'local-realm-spec.json')
