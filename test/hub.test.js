@@ -205,6 +205,34 @@ describe('hub store (mock server)', () => {
     assert.equal(requests[0].auth, undefined)
   })
 
+  it('put() refuses local-realm objects (defense-in-depth)', async () => {
+    requests.length = 0
+    const store = createHubStore({ url: hub.url, token: 'my-token' })
+    const localObj = {
+      ...FIXTURE,
+      item: { ...FIXTURE.item, in: ['local'] }
+    }
+    const result = await store.put(localObj)
+    assert.ok(!result.ok, 'should refuse')
+    assert.match(result.error, /local-realm/)
+    // No PUT request should have been made
+    const putReqs = requests.filter(r => r.method === 'PUT')
+    assert.equal(putReqs.length, 0, 'should not send any request to hub')
+  })
+
+  it('put() refuses mixed local+public realm objects', async () => {
+    requests.length = 0
+    const store = createHubStore({ url: hub.url })
+    const mixedObj = {
+      ...FIXTURE,
+      item: { ...FIXTURE.item, in: ['local', 'dataverse001'] }
+    }
+    const result = await store.put(mixedObj)
+    assert.ok(!result.ok, 'should refuse mixed local+public')
+    const putReqs = requests.filter(r => r.method === 'PUT')
+    assert.equal(putReqs.length, 0)
+  })
+
   it('handles unreachable server gracefully', async () => {
     const store = createHubStore({ url: 'http://127.0.0.1:1' }) // nothing on port 1
     assert.equal(await store.get('any.ref'), null)

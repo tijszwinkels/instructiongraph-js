@@ -651,6 +651,21 @@ describe('CLI', () => {
       await rm(freshDir, { recursive: true })
     })
 
+    it('ig create with explicit in:[local] in spec never reaches hub', async () => {
+      // Even without --realm local, if the spec says in:['local'], it must not leak
+      const hubSizeBefore = stored.size
+      const specPath = join(projectDir, 'explicit-local-spec.json')
+      await writeFile(specPath, JSON.stringify({ type: 'NOTE', in: ['local'], content: { text: 'explicit-local' } }))
+      const { stdout } = await ig('create', specPath)
+      const ref = stdout.trim().split('\n').pop()
+      assert.ok(ref.includes('.'), 'should return a ref')
+      assert.equal(stored.size, hubSizeBefore, 'should NOT push explicit in:[local] to hub')
+
+      // Should exist locally
+      const localPath = join(projectDir, '.instructionGraph', 'data', `${ref}.json`)
+      await access(localPath)
+    })
+
     it('ig create --realm local: never reaches hub even with data dir', async () => {
       const hubSizeBefore = stored.size
       const specPath = join(projectDir, 'local-realm-spec.json')

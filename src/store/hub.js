@@ -5,6 +5,7 @@
  */
 
 import { canonicalJSON } from '../canonical.js'
+import { LOCAL_REALM } from './realm-filter.js'
 
 /**
  * Create a hub store.
@@ -64,6 +65,14 @@ export function createHubStore({ url, token = null }) {
     },
 
     async put(signedObj) {
+      // Defense-in-depth: local realm objects must NEVER be sent to a hub,
+      // regardless of how the caller wired their store.
+      const realms = signedObj.item?.in || []
+      if (realms.includes(LOCAL_REALM)) {
+        console.warn(`[hub] Refusing to upload local-realm object ${signedObj.item?.ref}`)
+        return { ok: false, error: 'local-realm objects cannot be uploaded to a hub' }
+      }
+
       const ref = signedObj.item?.ref || `${signedObj.item?.pubkey}.${signedObj.item?.id}`
       try {
         const res = await fetch(`${baseUrl}/${ref}`, {
