@@ -13,7 +13,7 @@
 
 import { writeFileSync, mkdirSync } from 'node:fs'
 import { join } from 'node:path'
-import { isVisible } from './realm-filter.js'
+import { isVisible, LOCAL_REALM } from './realm-filter.js'
 
 /**
  * Create a sync store that mirrors hub proxy behavior.
@@ -45,13 +45,22 @@ export function createSyncStore({ local, remote, activePubkey = null, sharedReal
   }
 
   /**
+   * Check if an object is local-only (has the 'local' realm).
+   * Local-realm objects are NEVER pushed to a remote hub.
+   */
+  function isLocalOnly(obj) {
+    const realms = obj?.item?.in || []
+    return realms.includes(LOCAL_REALM)
+  }
+
+  /**
    * Check if an object has any identity-realm (non-public) realm membership.
    * Identity realms are pubkeys used as realm names — any realm that isn't
-   * a well-known public realm like 'dataverse001'.
+   * a well-known public realm like 'dataverse001' or 'local'.
    */
   function hasIdentityRealm(obj) {
     const realms = obj?.item?.in || []
-    return realms.some(r => r !== 'dataverse001')
+    return realms.some(r => r !== 'dataverse001' && r !== LOCAL_REALM)
   }
 
   /** Check if we're currently authenticated with the remote. */
@@ -61,9 +70,11 @@ export function createSyncStore({ local, remote, activePubkey = null, sharedReal
 
   /**
    * Check if an object should be pushed to the remote.
+   * Local-realm objects are NEVER pushed.
    * Identity-realm objects are only pushed when authenticated.
    */
   function shouldPushToRemote(obj) {
+    if (isLocalOnly(obj)) return false
     if (hasIdentityRealm(obj) && !isAuthenticated()) return false
     return true
   }

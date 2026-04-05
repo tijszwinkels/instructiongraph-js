@@ -84,6 +84,7 @@ Commands:
   ig realm                              Show current default realm
   ig realm set identity                 Go private (identity realm)
   ig realm set dataverse001             Go public
+  ig realm set local                    Local only (never synced)
   ig realm set <realm>                  Set a specific realm
 
 Run 'ig <command> --help' for command-specific help.`)
@@ -101,7 +102,7 @@ function commandUsage(command) {
 
     identity: `Usage: ig identity [generate|activate|list] [options]\n\nShow or manage the active identity.\n\nSubcommands:\n  ig identity generate [--name N] [--project] [--activate]\n  ig identity activate <name>\n  ig identity list\n\nEnvironment:\n  INSTRUCTIONGRAPH_DIR  Override config directory location`,
     server: `Usage: ig server [set <url> | login | logout | remove | push]\n\nShow, configure, or remove the hub server connection.\n\nSubcommands:\n  ig server              Show current server status and auth\n  ig server set <url>    Connect to a hub server for sync\n  ig server login        Log in with your active identity\n  ig server logout       Log out from the hub\n  ig server remove       Disconnect and go offline\n  ig server push [--all]  Push local objects (default: your realms only)\n\nWithout a server, all data stays on local filesystem only.\nWith a server, objects sync between local storage and the hub.\nLogin uses your active identity (see ig identity).`,
-    realm: `Usage: ig realm [set <realm|identity|dataverse001>]\n\nShow or set the default realm used for new objects.\n\n  ig realm set identity       Use current identity\'s realm (private)\n  ig realm set dataverse001   Use the public dataverse realm\n  ig realm set <pubkey>       Use any specific realm`
+    realm: `Usage: ig realm [set <realm|identity|dataverse001|local>]\n\nShow or set the default realm used for new objects.\n\n  ig realm set identity       Use current identity\'s realm (private)\n  ig realm set dataverse001   Use the public dataverse realm\n  ig realm set local          Local only \u2014 never synced to any server\n  ig realm set <pubkey>       Use any specific realm`
   }
 
   if (!docs[command]) die(`Unknown command: ${command}\nRun 'ig --help' for usage.`)
@@ -484,6 +485,10 @@ async function showRealm() {
     if (configuredRealm === 'dataverse001') {
       console.log(`Current realm: dataverse001 (public)`)
       console.log('New objects will be visible to everyone.')
+    } else if (configuredRealm === 'local') {
+      console.log(`Current realm: local (local only — never synced)`)
+      console.log('New objects stay on the local filesystem only.')
+      console.log('They are never uploaded to a server, even when logged in.')
     } else {
       console.log(`Current realm: ${configuredRealm}`)
     }
@@ -505,13 +510,16 @@ async function showRealm() {
   console.log('The realm controls who can see your objects:')
   console.log('  dataverse001     Public - visible to everyone')
   console.log('  <your pubkey>    Private - only visible to you (identity realm)')
+  console.log('  local            Local only - never uploaded to any server')
   console.log('')
-  console.log('When connected to a server, all objects are uploaded, but private')
-  console.log('objects are only accessible to you, after you log in (ig server login).')
+  console.log('When connected to a server, public and private objects are uploaded.')
+  console.log('Private objects are only accessible to you after you log in.')
+  console.log('Local objects are NEVER uploaded, even when logged in.')
   console.log('')
   console.log('To switch:')
   console.log('  ig realm set dataverse001        Go public')
   console.log('  ig realm set identity            Go private (use current identity realm)')
+  console.log('  ig realm set local               Local only (never synced)')
 }
 
 async function setRealm() {
@@ -533,6 +541,10 @@ async function setRealm() {
   if (realm === 'dataverse001') {
     console.log('Set default realm: dataverse001 (public)')
     console.log('New objects will be visible to everyone.')
+  } else if (realm === 'local') {
+    console.log('Set default realm: local (local only)')
+    console.log('New objects stay on the local filesystem only.')
+    console.log('They are never uploaded to a server, even when logged in.')
   } else {
     console.log(`Set default realm: ${realm} (identity realm - private)`)
     console.log('New objects will only be visible to you.')
@@ -633,6 +645,7 @@ async function showStatus() {
   const defaultRealm = readConfig(configDir, 'default-realm', null)
   if (defaultRealm) {
     const realmLabel = defaultRealm === 'dataverse001' ? '(public)' :
+      defaultRealm === 'local' ? '(local only \u2014 never synced)' :
       defaultRealm.length === 44 ? '(identity realm \u2014 private)' : ''
     console.log(`  ${defaultRealm}${realmLabel ? ` \x1b[2m${realmLabel}\x1b[0m` : ''}`)
   } else {

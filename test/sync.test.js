@@ -442,6 +442,76 @@ describe('sync store', () => {
     })
   })
 
+  describe('local realm: never push to remote', () => {
+    it('put: never pushes local realm objects even when authenticated', async () => {
+      const local = createMockStore()
+      const remote = createMockHubStore()
+      remote.getToken = () => 'valid-token'
+      const sync = createSyncStore({ local, remote })
+
+      const localObj = makeObj('pk.1', 1, ['local'])
+      await sync.put(localObj)
+
+      assert.ok(local.data['pk.1'], 'should store locally')
+      assert.ok(!remote.data['pk.1'], 'should NOT push local realm to remote')
+    })
+
+    it('put: never pushes mixed local+public realm objects', async () => {
+      const local = createMockStore()
+      const remote = createMockHubStore()
+      remote.getToken = () => 'valid-token'
+      const sync = createSyncStore({ local, remote })
+
+      const mixedObj = makeObj('pk.1', 1, ['local', 'dataverse001'])
+      await sync.put(mixedObj)
+
+      assert.ok(local.data['pk.1'], 'should store locally')
+      assert.ok(!remote.data['pk.1'], 'should NOT push when local realm present')
+    })
+
+    it('get: does not push local realm objects to hub on 404', async () => {
+      const localObj = makeObj('pk.1', 3, ['local'])
+      const local = createMockStore({ 'pk.1': localObj })
+      const remote = createMockHubStore() // hub empty → 404
+      const sync = createSyncStore({ local, remote })
+
+      const obj = await sync.get('pk.1')
+      assert.equal(obj.item.revision, 3)
+      await new Promise(r => setTimeout(r, 10))
+      assert.ok(!remote.data['pk.1'], 'should NOT push local realm to hub')
+    })
+
+    it('get: does not push local realm objects to hub when local is newer', async () => {
+      const local = createMockStore({ 'pk.1': makeObj('pk.1', 7, ['local']) })
+      const remote = createMockHubStore({ 'pk.1': makeObj('pk.1', 3, ['local']) })
+      const sync = createSyncStore({ local, remote })
+
+      const obj = await sync.get('pk.1')
+      assert.equal(obj.item.revision, 7)
+      await new Promise(r => setTimeout(r, 10))
+      // Remote should still have revision 3, not updated
+      assert.equal(remote.data['pk.1'].item.revision, 3)
+    })
+
+    it('pushAll: skips local realm objects', async () => {
+      const local = createMockStore({
+        'pk.1': makeObj('pk.1', 1, ['dataverse001']),
+        'pk.2': makeObj('pk.2', 1, ['local']),
+        'pk.3': makeObj('pk.3', 1, ['local', 'dataverse001'])
+      })
+      const remote = createMockHubStore()
+      remote.getToken = () => 'valid-token'
+      const sync = createSyncStore({ local, remote })
+
+      const result = await sync.pushAll()
+      assert.equal(result.pushed, 1, 'only public pk.1 pushed')
+      assert.equal(result.skipped, 2, 'local realm objects skipped')
+      assert.ok(remote.data['pk.1'])
+      assert.ok(!remote.data['pk.2'])
+      assert.ok(!remote.data['pk.3'])
+    })
+  })
+
   describe('authenticate / logout delegation', () => {
     it('delegates authenticate() to remote store', async () => {
       const local = createMockStore()
