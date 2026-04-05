@@ -254,7 +254,15 @@ async function makeClient(overrides = {}) {
     return isVisible(obj, filterState.pubkey, filterState.realms)
   }
 
-  if (hubUrl && hasLocal) {
+  // If realm is 'local', ensure data dir exists — local realm objects must never
+  // go through hub-only mode, which would bypass the sync store's push guard.
+  const effectiveRealm = overrides.realm || readConfig(configDir, 'default-realm', null)
+  if (effectiveRealm === 'local' && !hasLocal) {
+    mkdirSync(dataDir, { recursive: true })
+  }
+  const hasLocalResolved = hasLocal || effectiveRealm === 'local'
+
+  if (hubUrl && hasLocalResolved) {
     // Both: sync store (local primary, hub sync)
     const local = createFsStore({ dataDir, filter: realmFilter })
     hub = createHubStore({ url: hubUrl, token: savedToken })
@@ -265,7 +273,7 @@ async function makeClient(overrides = {}) {
     hub = createHubStore({ url: hubUrl, token: savedToken })
     store = hub
     isOnline = true
-  } else if (hasLocal) {
+  } else if (hasLocalResolved) {
     // Local only (offline mode)
     store = createFsStore({ dataDir, filter: realmFilter })
   } else {
@@ -417,9 +425,10 @@ async function identityActivate() {
   console.log(`Pubkey: ${kp.pubkey}`)
 
   // If the default realm is an identity realm (explicit or implicit), follow the new identity
+  // Preserve well-known realms like 'dataverse001' and 'local'
   const currentRealm = readConfig(configDir, 'default-realm', null)
   const isIdentityRealm = currentRealm === null  // implicit: identity realm by default
-    || (currentRealm !== 'dataverse001' && currentRealm !== kp.pubkey)
+    || (currentRealm !== 'dataverse001' && currentRealm !== 'local' && currentRealm !== kp.pubkey)
   if (isIdentityRealm) {
     writeConfig(configDir, 'default-realm', kp.pubkey)
     console.log(`Updated default realm to identity realm: ${kp.pubkey}`)

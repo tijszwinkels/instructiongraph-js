@@ -464,6 +464,18 @@ describe('CLI', () => {
       assert.equal(realm.trim(), 'dataverse001')
     })
 
+    it('does not change realm when switching from local realm', async () => {
+      await ig('realm', 'set', 'local')
+      await ig('identity', 'generate', '--name', 'eve')
+      const { stdout } = await ig('identity', 'activate', 'eve')
+      assert.doesNotMatch(stdout, /Updated default realm/)
+
+      const realm = await readFile(
+        join(projectDir, '.instructionGraph', 'config', 'default-realm'), 'utf-8'
+      )
+      assert.equal(realm.trim(), 'local')
+    })
+
     it('fails if the identity does not exist', async () => {
       await assert.rejects(
         ig('identity', 'activate', 'missing'),
@@ -601,6 +613,56 @@ describe('CLI', () => {
       const { stdout: signedJson } = await ig('sign', specPath)
       const signed = JSON.parse(signedJson)
       assert.deepEqual(signed.item.in, ['dataverse001'])
+    })
+
+    it('ig realm set local: objects never reach the hub', async () => {
+      // Set up a fresh project with hub but NO local data dir
+      const freshDir = await mkdtemp(join(tmpdir(), 'ig-local-realm-test-'))
+      const igDir = join(freshDir, '.instructionGraph')
+      await mkdir(join(igDir, 'config'), { recursive: true })
+      await mkdir(join(igDir, 'identities', 'default'), { recursive: true })
+      await writeFile(join(igDir, 'config', 'hub-url'), hub.url)
+      await writeFile(join(igDir, 'config', 'active-identity'), 'default')
+      await writeFile(join(igDir, 'config', 'default-realm'), 'local')
+
+      const pem = generateKeyPairSync('ec', { namedCurve: 'prime256v1' })
+        .privateKey.export({ format: 'pem', type: 'pkcs8' }).toString()
+      await writeFile(join(igDir, 'identities', 'default', 'private.pem'), pem)
+
+      function igFresh(...a) {
+        return execFile('node', [CLI, ...a], {
+          cwd: freshDir,
+          env: { ...process.env, INSTRUCTIONGRAPH_DIR: igDir }
+        })
+      }
+
+      const hubSizeBefore = stored.size
+      const specPath = join(freshDir, 'local-spec.json')
+      await writeFile(specPath, JSON.stringify({ type: 'NOTE', content: { text: 'local-only' } }))
+      const { stdout } = await igFresh('create', specPath)
+      const ref = stdout.trim().split('\n').pop()
+      assert.ok(ref.includes('.'), 'should return a ref')
+      assert.equal(stored.size, hubSizeBefore, 'should NOT push local realm objects to hub')
+
+      // Should exist on local filesystem
+      const localPath = join(igDir, 'data', `${ref}.json`)
+      await access(localPath)
+
+      await rm(freshDir, { recursive: true })
+    })
+
+    it('ig create --realm local: never reaches hub even with data dir', async () => {
+      const hubSizeBefore = stored.size
+      const specPath = join(projectDir, 'local-realm-spec.json')
+      await writeFile(specPath, JSON.stringify({ type: 'NOTE', content: { text: 'local-create' } }))
+      const { stdout } = await ig('create', specPath, '--realm', 'local')
+      const ref = stdout.trim().split('\n').pop()
+      assert.ok(ref.includes('.'), 'should return a ref')
+      assert.equal(stored.size, hubSizeBefore, 'should NOT push local realm to hub')
+
+      // Should exist locally
+      const localPath = join(projectDir, '.instructionGraph', 'data', `${ref}.json`)
+      await access(localPath)
     })
   })
 })
