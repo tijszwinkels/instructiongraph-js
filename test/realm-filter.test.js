@@ -53,4 +53,15 @@ describe('isVisible', () => {
     assert.equal(isVisible(obj([PK_ALICE]), PK_ALICE, []), true)
     assert.equal(isVisible(obj([SHARED_REALM]), PK_ALICE, []), false)
   })
+
+  it('local realm is always visible', () => {
+    assert.equal(isVisible(obj(['local']), PK_ALICE, []), true)
+    assert.equal(isVisible(obj(['local']), PK_BOB, []), true)
+    assert.equal(isVisible(obj(['local']), null, []), true)
+  })
+
+  it('local realm with other realms is visible', () => {
+    assert.equal(isVisible(obj(['local', 'dataverse001']), PK_ALICE, []), true)
+    assert.equal(isVisible(obj(['local', PK_ALICE]), PK_BOB, []), true)
+  })
 })

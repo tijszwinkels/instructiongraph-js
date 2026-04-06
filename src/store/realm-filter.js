@@ -9,6 +9,13 @@ import { readFileSync, existsSync } from 'node:fs'
 import { join } from 'node:path'
 
 /**
+ * Well-known realm for local-only objects. Objects in this realm are never
+ * pushed to a remote hub, even when authenticated. They live on the local
+ * filesystem only.
+ */
+export const LOCAL_REALM = 'local'
+
+/**
  * Load cached shared realm memberships from disk.
  *
  * @param {string} configDir - The .instructionGraph directory
@@ -38,6 +45,7 @@ export function isVisible(obj, activePubkey, sharedRealms) {
 
   for (const r of realms) {
     if (r === 'dataverse001') return true
+    if (r === LOCAL_REALM) return true
     if (r === activePubkey) return true
     if (sharedRealms.includes(r)) return true
   }
