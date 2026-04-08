@@ -102,7 +102,7 @@ function commandUsage(command) {
 
     identity: `Usage: ig identity [generate|activate|list] [options]\n\nShow or manage the active identity.\n\nSubcommands:\n  ig identity generate [--name N] [--project] [--activate]\n  ig identity activate <name>\n  ig identity list\n\nEnvironment:\n  INSTRUCTIONGRAPH_DIR  Override config directory location`,
     server: `Usage: ig server [set <url> | login | logout | remove | push]\n\nShow, configure, or remove the hub server connection.\n\nSubcommands:\n  ig server              Show current server status and auth\n  ig server set <url>    Connect to a hub server for sync\n  ig server login        Log in with your active identity\n  ig server logout       Log out from the hub\n  ig server remove       Disconnect and go offline\n  ig server push [--all]  Push local objects (default: your realms only)\n\nWithout a server, all data stays on local filesystem only.\nWith a server, objects sync between local storage and the hub.\nLogin uses your active identity (see ig identity).`,
-    realm: `Usage: ig realm [set <realm|identity|dataverse001|local>]\n\nShow or set the default realm used for new objects.\n\n  ig realm set identity       Use current identity\'s realm (private)\n  ig realm set dataverse001   Use the public dataverse realm\n  ig realm set local          Local only \u2014 never synced to any server\n  ig realm set <pubkey>       Use any specific realm`
+    realm: `Usage: ig realm [set <realm|identity|dataverse001|server-public|local>]\n\nShow or set the default realm used for new objects.\n\n  ig realm set identity       Use current identity\'s realm (private)\n  ig realm set dataverse001   Use the public dataverse realm\n  ig realm set server-public  Public on this hub, not propagated globally\n  ig realm set local          Local only \u2014 never synced to any server\n  ig realm set <pubkey>       Use any specific realm`
   }
 
   if (!docs[command]) die(`Unknown command: ${command}\nRun 'ig --help' for usage.`)
@@ -257,10 +257,10 @@ async function makeClient(overrides = {}) {
   // If realm is 'local', ensure data dir exists — local realm objects must never
   // go through hub-only mode, which would bypass the sync store's push guard.
   const effectiveRealm = overrides.realm || readConfig(configDir, 'default-realm', null)
-  if (effectiveRealm === 'local' && !hasLocal) {
+  if ((effectiveRealm === 'local' || effectiveRealm === 'server-public') && !hasLocal) {
     mkdirSync(dataDir, { recursive: true })
   }
-  const hasLocalResolved = hasLocal || effectiveRealm === 'local'
+  const hasLocalResolved = hasLocal || effectiveRealm === 'local' || effectiveRealm === 'server-public'
 
   if (hubUrl && hasLocalResolved) {
     // Both: sync store (local primary, hub sync)
@@ -996,14 +996,14 @@ async function main() {
       // Pre-check: can't target someone else's identity realm
       const specRealms = spec.in || []
       const signerPubkey = ctx.client.pubkey
-      const foreignIdentityRealm = specRealms.find(r => r !== 'dataverse001' && r.length === 44 && r !== signerPubkey)
+      const foreignIdentityRealm = specRealms.find(r => r !== 'dataverse001' && r !== 'local' && r !== 'server-public' && r.length === 44 && r !== signerPubkey)
       if (foreignIdentityRealm) {
         die(`Cannot create in identity realm ${foreignIdentityRealm} \u2014 it belongs to a different pubkey.\n` +
             `Your pubkey: ${signerPubkey}`)
       }
 
       // If --push with identity realm and not logged in, auto-authenticate
-      const hasIdentityRealm = specRealms.some(r => r !== 'dataverse001' && r.length === 44)
+      const hasIdentityRealm = specRealms.some(r => r !== 'dataverse001' && r !== 'local' && r !== 'server-public' && r.length === 44)
       if (forcePush && hasIdentityRealm && ctx.isOnline) {
         const savedToken = readConfig(ctx.configDir, 'auth-token', null)
         if (!savedToken) {
