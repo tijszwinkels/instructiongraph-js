@@ -988,9 +988,11 @@ async function main() {
 
       const spec = JSON.parse(readFileSync(resolve(file), 'utf-8'))
 
-      // If spec explicitly targets local realm, ensure makeClient uses a local-capable store
+      // If spec explicitly targets local or server-public realm, ensure makeClient uses a local-capable store
       const effectiveLocalRealm = realm === 'local' || (spec.in && spec.in.includes('local'))
-      const ctx = await makeClient({ identityName, realm: effectiveLocalRealm ? 'local' : realm })
+      const effectiveServerPublic = realm === 'server-public' || (spec.in && spec.in.includes('server-public'))
+      const realmOverride = effectiveLocalRealm ? 'local' : effectiveServerPublic ? 'server-public' : realm
+      const ctx = await makeClient({ identityName, realm: realmOverride })
       printStatus(ctx)
 
       // Pre-check: can't target someone else's identity realm
