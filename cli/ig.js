@@ -102,7 +102,7 @@ function commandUsage(command) {
 
     identity: `Usage: ig identity [generate|activate|list] [options]\n\nShow or manage the active identity.\n\nSubcommands:\n  ig identity generate [--name N] [--project] [--activate]\n  ig identity activate <name>\n  ig identity list\n\nEnvironment:\n  INSTRUCTIONGRAPH_DIR  Override config directory location`,
     server: `Usage: ig server [set <url> | login | logout | remove | push]\n\nShow, configure, or remove the hub server connection.\n\nSubcommands:\n  ig server              Show current server status and auth\n  ig server set <url>    Connect to a hub server for sync\n  ig server login        Log in with your active identity\n  ig server logout       Log out from the hub\n  ig server remove       Disconnect and go offline\n  ig server push [--all]  Push local objects (default: your realms only)\n\nWithout a server, all data stays on local filesystem only.\nWith a server, objects sync between local storage and the hub.\nLogin uses your active identity (see ig identity).`,
-    realm: `Usage: ig realm [set <realm|identity|dataverse001|local>]\n\nShow or set the default realm used for new objects.\n\n  ig realm set identity       Use current identity\'s realm (private)\n  ig realm set dataverse001   Use the public dataverse realm\n  ig realm set local          Local only \u2014 never synced to any server\n  ig realm set <pubkey>       Use any specific realm`
+    realm: `Usage: ig realm [set <realm|identity|dataverse001|server-public|local>]\n\nShow or set the default realm used for new objects.\n\n  ig realm set identity       Use current identity\'s realm (private)\n  ig realm set dataverse001   Use the public dataverse realm\n  ig realm set server-public  Public on this hub, not propagated globally\n  ig realm set local          Local only \u2014 never synced to any server\n  ig realm set <pubkey>       Use any specific realm`
   }
 
   if (!docs[command]) die(`Unknown command: ${command}\nRun 'ig --help' for usage.`)
@@ -257,10 +257,10 @@ async function makeClient(overrides = {}) {
   // If realm is 'local', ensure data dir exists — local realm objects must never
   // go through hub-only mode, which would bypass the sync store's push guard.
   const effectiveRealm = overrides.realm || readConfig(configDir, 'default-realm', null)
-  if (effectiveRealm === 'local' && !hasLocal) {
+  if ((effectiveRealm === 'local' || effectiveRealm === 'server-public') && !hasLocal) {
     mkdirSync(dataDir, { recursive: true })
   }
-  const hasLocalResolved = hasLocal || effectiveRealm === 'local'
+  const hasLocalResolved = hasLocal || effectiveRealm === 'local' || effectiveRealm === 'server-public'
 
   if (hubUrl && hasLocalResolved) {
     // Both: sync store (local primary, hub sync)
@@ -428,7 +428,7 @@ async function identityActivate() {
   // Preserve well-known realms like 'dataverse001' and 'local'
   const currentRealm = readConfig(configDir, 'default-realm', null)
   const isIdentityRealm = currentRealm === null  // implicit: identity realm by default
-    || (currentRealm !== 'dataverse001' && currentRealm !== 'local' && currentRealm !== kp.pubkey)
+    || (currentRealm !== 'dataverse001' && currentRealm !== 'local' && currentRealm !== 'server-public' && currentRealm !== kp.pubkey)
   if (isIdentityRealm) {
     writeConfig(configDir, 'default-realm', kp.pubkey)
     console.log(`Updated default realm to identity realm: ${kp.pubkey}`)
@@ -494,6 +494,10 @@ async function showRealm() {
     if (configuredRealm === 'dataverse001') {
       console.log(`Current realm: dataverse001 (public)`)
       console.log('New objects will be visible to everyone.')
+    } else if (configuredRealm === 'server-public') {
+      console.log(`Current realm: server-public (readable by anyone, not propagated globally)`)
+      console.log('New objects will be pushed to the server and readable without auth,')
+      console.log('but will not be propagated to other hubs or discovered via global scanning.')
     } else if (configuredRealm === 'local') {
       console.log(`Current realm: local (local only — never synced)`)
       console.log('New objects stay on the local filesystem only.')
@@ -517,16 +521,18 @@ async function showRealm() {
 
   console.log('')
   console.log('The realm controls who can see your objects:')
-  console.log('  dataverse001     Public - visible to everyone')
+  console.log('  dataverse001     Public - visible to everyone, propagated globally')
+  console.log('  server-public    Readable by anyone, but stays on this hub only')
   console.log('  <your pubkey>    Private - only visible to you (identity realm)')
   console.log('  local            Local only - never uploaded to any server')
   console.log('')
-  console.log('When connected to a server, public and private objects are uploaded.')
+  console.log('When connected to a server, public, server-public, and private objects are uploaded.')
   console.log('Private objects are only accessible to you after you log in.')
   console.log('Local objects are NEVER uploaded, even when logged in.')
   console.log('')
   console.log('To switch:')
-  console.log('  ig realm set dataverse001        Go public')
+  console.log('  ig realm set dataverse001        Go public (global propagation)')
+  console.log('  ig realm set server-public       Public on this hub only (no propagation)')
   console.log('  ig realm set identity            Go private (use current identity realm)')
   console.log('  ig realm set local               Local only (never synced)')
 }
@@ -550,6 +556,10 @@ async function setRealm() {
   if (realm === 'dataverse001') {
     console.log('Set default realm: dataverse001 (public)')
     console.log('New objects will be visible to everyone.')
+  } else if (realm === 'server-public') {
+    console.log('Set default realm: server-public')
+    console.log('New objects will be pushed to the server and readable by anyone without auth,')
+    console.log('but will not be propagated globally to other hubs.')
   } else if (realm === 'local') {
     console.log('Set default realm: local (local only)')
     console.log('New objects stay on the local filesystem only.')
@@ -654,6 +664,7 @@ async function showStatus() {
   const defaultRealm = readConfig(configDir, 'default-realm', null)
   if (defaultRealm) {
     const realmLabel = defaultRealm === 'dataverse001' ? '(public)' :
+      defaultRealm === 'server-public' ? '(server-public \u2014 readable by anyone, not propagated)' :
       defaultRealm === 'local' ? '(local only \u2014 never synced)' :
       defaultRealm.length === 44 ? '(identity realm \u2014 private)' : ''
     console.log(`  ${defaultRealm}${realmLabel ? ` \x1b[2m${realmLabel}\x1b[0m` : ''}`)
@@ -736,7 +747,7 @@ async function serverPush() {
   let realms = null  // null = all realms (--all)
   let pubkey = null
   if (!pushAll) {
-    realms = ['dataverse001']
+    realms = ['dataverse001', 'server-public']
     const identityConfig = resolveIdentityConfig(configDir)
     if (identityConfig) {
       try {
@@ -985,14 +996,14 @@ async function main() {
       // Pre-check: can't target someone else's identity realm
       const specRealms = spec.in || []
       const signerPubkey = ctx.client.pubkey
-      const foreignIdentityRealm = specRealms.find(r => r !== 'dataverse001' && r.length === 44 && r !== signerPubkey)
+      const foreignIdentityRealm = specRealms.find(r => r !== 'dataverse001' && r !== 'local' && r !== 'server-public' && r.length === 44 && r !== signerPubkey)
       if (foreignIdentityRealm) {
         die(`Cannot create in identity realm ${foreignIdentityRealm} \u2014 it belongs to a different pubkey.\n` +
             `Your pubkey: ${signerPubkey}`)
       }
 
       // If --push with identity realm and not logged in, auto-authenticate
-      const hasIdentityRealm = specRealms.some(r => r !== 'dataverse001' && r.length === 44)
+      const hasIdentityRealm = specRealms.some(r => r !== 'dataverse001' && r !== 'local' && r !== 'server-public' && r.length === 44)
       if (forcePush && hasIdentityRealm && ctx.isOnline) {
         const savedToken = readConfig(ctx.configDir, 'auth-token', null)
         if (!savedToken) {

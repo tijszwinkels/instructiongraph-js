@@ -64,4 +64,15 @@ describe('isVisible', () => {
     assert.equal(isVisible(obj(['local', 'dataverse001']), PK_ALICE, []), true)
     assert.equal(isVisible(obj(['local', PK_ALICE]), PK_BOB, []), true)
   })
+
+  it('server-public realm is always visible', () => {
+    assert.equal(isVisible(obj(['server-public']), PK_ALICE, []), true)
+    assert.equal(isVisible(obj(['server-public']), PK_BOB, []), true)
+    assert.equal(isVisible(obj(['server-public']), null, []), true)
+  })
+
+  it('server-public realm with other realms is visible', () => {
+    assert.equal(isVisible(obj(['server-public', 'dataverse001']), PK_ALICE, []), true)
+    assert.equal(isVisible(obj(['server-public', PK_ALICE]), PK_BOB, []), true)
+  })
 })
