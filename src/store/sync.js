@@ -13,7 +13,7 @@
 
 import { writeFileSync, mkdirSync } from 'node:fs'
 import { join } from 'node:path'
-import { isVisible, LOCAL_REALM } from './realm-filter.js'
+import { isVisible, LOCAL_REALM, SERVER_PUBLIC_REALM } from './realm-filter.js'
 
 /**
  * Create a sync store that mirrors hub proxy behavior.
@@ -60,7 +60,7 @@ export function createSyncStore({ local, remote, activePubkey = null, sharedReal
    */
   function hasIdentityRealm(obj) {
     const realms = obj?.item?.in || []
-    return realms.some(r => r !== 'dataverse001' && r !== LOCAL_REALM)
+    return realms.some(r => r !== 'dataverse001' && r !== LOCAL_REALM && r !== SERVER_PUBLIC_REALM)
   }
 
   /** Check if we're currently authenticated with the remote. */

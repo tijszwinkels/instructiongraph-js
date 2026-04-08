@@ -428,7 +428,7 @@ async function identityActivate() {
   // Preserve well-known realms like 'dataverse001' and 'local'
   const currentRealm = readConfig(configDir, 'default-realm', null)
   const isIdentityRealm = currentRealm === null  // implicit: identity realm by default
-    || (currentRealm !== 'dataverse001' && currentRealm !== 'local' && currentRealm !== kp.pubkey)
+    || (currentRealm !== 'dataverse001' && currentRealm !== 'local' && currentRealm !== 'server-public' && currentRealm !== kp.pubkey)
   if (isIdentityRealm) {
     writeConfig(configDir, 'default-realm', kp.pubkey)
     console.log(`Updated default realm to identity realm: ${kp.pubkey}`)
@@ -494,6 +494,10 @@ async function showRealm() {
     if (configuredRealm === 'dataverse001') {
       console.log(`Current realm: dataverse001 (public)`)
       console.log('New objects will be visible to everyone.')
+    } else if (configuredRealm === 'server-public') {
+      console.log(`Current realm: server-public (readable by anyone, not propagated globally)`)
+      console.log('New objects will be pushed to the server and readable without auth,')
+      console.log('but will not be propagated to other hubs or discovered via global scanning.')
     } else if (configuredRealm === 'local') {
       console.log(`Current realm: local (local only — never synced)`)
       console.log('New objects stay on the local filesystem only.')
@@ -517,16 +521,18 @@ async function showRealm() {
 
   console.log('')
   console.log('The realm controls who can see your objects:')
-  console.log('  dataverse001     Public - visible to everyone')
+  console.log('  dataverse001     Public - visible to everyone, propagated globally')
+  console.log('  server-public    Readable by anyone, but stays on this hub only')
   console.log('  <your pubkey>    Private - only visible to you (identity realm)')
   console.log('  local            Local only - never uploaded to any server')
   console.log('')
-  console.log('When connected to a server, public and private objects are uploaded.')
+  console.log('When connected to a server, public, server-public, and private objects are uploaded.')
   console.log('Private objects are only accessible to you after you log in.')
   console.log('Local objects are NEVER uploaded, even when logged in.')
   console.log('')
   console.log('To switch:')
-  console.log('  ig realm set dataverse001        Go public')
+  console.log('  ig realm set dataverse001        Go public (global propagation)')
+  console.log('  ig realm set server-public       Public on this hub only (no propagation)')
   console.log('  ig realm set identity            Go private (use current identity realm)')
   console.log('  ig realm set local               Local only (never synced)')
 }
@@ -550,6 +556,10 @@ async function setRealm() {
   if (realm === 'dataverse001') {
     console.log('Set default realm: dataverse001 (public)')
     console.log('New objects will be visible to everyone.')
+  } else if (realm === 'server-public') {
+    console.log('Set default realm: server-public')
+    console.log('New objects will be pushed to the server and readable by anyone without auth,')
+    console.log('but will not be propagated globally to other hubs.')
   } else if (realm === 'local') {
     console.log('Set default realm: local (local only)')
     console.log('New objects stay on the local filesystem only.')
@@ -654,6 +664,7 @@ async function showStatus() {
   const defaultRealm = readConfig(configDir, 'default-realm', null)
   if (defaultRealm) {
     const realmLabel = defaultRealm === 'dataverse001' ? '(public)' :
+      defaultRealm === 'server-public' ? '(server-public \u2014 readable by anyone, not propagated)' :
       defaultRealm === 'local' ? '(local only \u2014 never synced)' :
       defaultRealm.length === 44 ? '(identity realm \u2014 private)' : ''
     console.log(`  ${defaultRealm}${realmLabel ? ` \x1b[2m${realmLabel}\x1b[0m` : ''}`)
@@ -736,7 +747,7 @@ async function serverPush() {
   let realms = null  // null = all realms (--all)
   let pubkey = null
   if (!pushAll) {
-    realms = ['dataverse001']
+    realms = ['dataverse001', 'server-public']
     const identityConfig = resolveIdentityConfig(configDir)
     if (identityConfig) {
       try {

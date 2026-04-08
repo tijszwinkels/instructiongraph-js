@@ -16,6 +16,13 @@ import { join } from 'node:path'
 export const LOCAL_REALM = 'local'
 
 /**
+ * Well-known realm for server-public objects. Objects in this realm are
+ * readable by anyone without auth (like dataverse001), but are NOT
+ * propagated globally — they stay on the hub they are pushed to.
+ */
+export const SERVER_PUBLIC_REALM = 'server-public'
+
+/**
  * Load cached shared realm memberships from disk.
  *
  * @param {string} configDir - The .instructionGraph directory
@@ -46,6 +53,7 @@ export function isVisible(obj, activePubkey, sharedRealms) {
   for (const r of realms) {
     if (r === 'dataverse001') return true
     if (r === LOCAL_REALM) return true
+    if (r === SERVER_PUBLIC_REALM) return true
     if (r === activePubkey) return true
     if (sharedRealms.includes(r)) return true
   }

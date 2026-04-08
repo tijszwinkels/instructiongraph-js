@@ -512,6 +512,52 @@ describe('sync store', () => {
     })
   })
 
+  describe('server-public realm: push without auth, no identity-realm gating', () => {
+    it('put: pushes server-public objects to remote without auth', async () => {
+      const local = createMockStore()
+      const remote = createMockHubStore()
+      // no getToken → not authenticated
+      const sync = createSyncStore({ local, remote })
+
+      const spObj = makeObj('pk.1', 1, ['server-public'])
+      await sync.put(spObj)
+
+      assert.ok(local.data['pk.1'], 'should store locally')
+      assert.ok(remote.data['pk.1'], 'should push server-public to remote without auth')
+    })
+
+    it('pushAll: includes server-public objects in default push', async () => {
+      const local = createMockStore({
+        'pk.1': makeObj('pk.1', 1, ['dataverse001']),
+        'pk.2': makeObj('pk.2', 1, ['server-public']),
+        'pk.3': makeObj('pk.3', 1, ['mypubkey'])
+      })
+      const remote = createMockHubStore()
+      // not authenticated
+      const sync = createSyncStore({ local, remote })
+
+      const result = await sync.pushAll({ realms: ['dataverse001', 'server-public'] })
+      assert.equal(result.pushed, 2, 'dataverse001 + server-public pushed')
+      assert.equal(result.skipped, 1, 'identity realm skipped')
+      assert.ok(remote.data['pk.1'])
+      assert.ok(remote.data['pk.2'])
+      assert.ok(!remote.data['pk.3'])
+    })
+
+    it('put: pushes mixed server-public + identity realm only when authenticated', async () => {
+      const local = createMockStore()
+      const remote = createMockHubStore()
+      // not authenticated
+      const sync = createSyncStore({ local, remote })
+
+      const mixedObj = makeObj('pk.1', 1, ['server-public', 'mypubkey'])
+      await sync.put(mixedObj)
+
+      assert.ok(local.data['pk.1'], 'should store locally')
+      assert.ok(!remote.data['pk.1'], 'should NOT push when identity realm present and not authenticated')
+    })
+  })
+
   describe('authenticate / logout delegation', () => {
     it('delegates authenticate() to remote store', async () => {
       const local = createMockStore()
