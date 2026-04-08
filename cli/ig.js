@@ -45,6 +45,29 @@ function die(msg) {
   process.exit(1)
 }
 
+function validateFlags(commandName, argv, { booleanFlags = [], valueFlags = [] } = {}) {
+  const allowedBoolean = new Set(booleanFlags.map(name => `--${name}`))
+  const allowedValue = new Set(valueFlags.map(name => `--${name}`))
+
+  for (let i = 0; i < argv.length; i++) {
+    const token = argv[i]
+    if (token === '--help' || token === '-h') continue
+    if (!token.startsWith('-')) continue
+
+    if (allowedBoolean.has(token)) continue
+    if (allowedValue.has(token)) {
+      const next = argv[i + 1]
+      if (next == null || next.startsWith('-')) {
+        die(`Option ${token} requires a value.\nRun 'ig ${commandName} --help' for usage.`)
+      }
+      i++
+      continue
+    }
+
+    die(`Unknown option for '${commandName}': ${token}\nRun 'ig ${commandName} --help' for usage.`)
+  }
+}
+
 function usage() {
   console.log(`ig - InstructionGraph CLI
 
@@ -872,6 +895,7 @@ async function main() {
 
   switch (cmd) {
     case 'status': {
+      validateFlags('status', args.slice(1))
       await showStatus()
       break
     }
@@ -879,6 +903,7 @@ async function main() {
     case 'get': {
       const ref = args[1]
       if (!ref) die('Usage: ig get <ref>')
+      validateFlags('get', args.slice(2), { booleanFlags: ['raw'], valueFlags: ['identity'] })
 
       const identityName = flag('identity')
       const raw = args.includes('--raw')
@@ -890,6 +915,10 @@ async function main() {
     }
 
     case 'search': {
+      validateFlags('search', args.slice(1), {
+        booleanFlags: ['counts', 'json', 'jsonl', 'raw'],
+        valueFlags: ['by', 'cursor', 'limit', 'type']
+      })
       const raw = args.includes('--raw')
       const ctx = await makeClient({ skipRealmCheck: raw })
       const result = await ctx.client.search({
@@ -919,6 +948,10 @@ async function main() {
     case 'inbound': {
       const ref = args[1]
       if (!ref) die('Usage: ig inbound <ref>')
+      validateFlags('inbound', args.slice(2), {
+        booleanFlags: ['counts', 'json', 'jsonl', 'raw'],
+        valueFlags: ['cursor', 'from', 'limit', 'relation', 'type']
+      })
       const raw = args.includes('--raw')
       const ctx = await makeClient({ skipRealmCheck: raw })
       const result = await ctx.client.inbound(ref, {
@@ -949,6 +982,7 @@ async function main() {
     case 'verify': {
       const file = args[1]
       if (!file) die('Usage: ig verify <file.json>')
+      validateFlags('verify', args.slice(2))
       const obj = JSON.parse(readFileSync(resolve(file), 'utf-8'))
       if (!isEnvelope(obj)) die('Not an instructionGraph001 envelope')
       const valid = await verify(obj.item.pubkey, obj.signature, obj.item)
@@ -965,6 +999,7 @@ async function main() {
     case 'sign': {
       const file = args[1]
       if (!file) die('Usage: ig sign <spec.json>')
+      validateFlags('sign', args.slice(2))
       const ctx = await makeClient()
       printStatus(ctx)
       const spec = JSON.parse(readFileSync(resolve(file), 'utf-8'))
@@ -977,6 +1012,10 @@ async function main() {
     case 'create': {
       const file = args[1]
       if (!file) die('Usage: ig create <spec.json>')
+      validateFlags('create', args.slice(2), {
+        booleanFlags: ['no-push', 'push', 'update'],
+        valueFlags: ['identity', 'realm']
+      })
 
       const identityName = flag('identity')
       const realm = flag('realm')
@@ -1054,18 +1093,26 @@ async function main() {
     }
 
     case 'auth':  // hidden alias for 'ig server login'
+      validateFlags('server login', args.slice(1))
       await serverLogin()
       break
 
     case 'identity': {
       const subcmd = args[1]
       if (subcmd === 'generate') {
+        validateFlags('identity generate', args.slice(2), {
+          booleanFlags: ['activate', 'project'],
+          valueFlags: ['name']
+        })
         await identityGenerate()
       } else if (subcmd === 'activate') {
+        validateFlags('identity activate', args.slice(3))
         await identityActivate()
       } else if (subcmd === 'list') {
+        validateFlags('identity list', args.slice(2))
         identityList()
       } else {
+        validateFlags('identity', args.slice(1))
         const configDir = findConfigDir()
         const identityConfig = resolveIdentityConfig(configDir)
         if (identityConfig) {
@@ -1085,16 +1132,22 @@ async function main() {
     case 'server': {
       const subcmd = args[1]
       if (!subcmd) {
+        validateFlags('server', args.slice(1))
         showServer()
       } else if (subcmd === 'set') {
+        validateFlags('server set', args.slice(3))
         setServer()
       } else if (subcmd === 'login') {
+        validateFlags('server login', args.slice(2))
         await serverLogin()
       } else if (subcmd === 'logout') {
+        validateFlags('server logout', args.slice(2))
         await serverLogout()
       } else if (subcmd === 'remove') {
+        validateFlags('server remove', args.slice(2))
         removeServer()
       } else if (subcmd === 'push') {
+        validateFlags('server push', args.slice(2), { booleanFlags: ['all'] })
         await serverPush()
       } else {
         die('Usage: ig server [set <url> | login | logout | remove | push]')
@@ -1105,8 +1158,10 @@ async function main() {
     case 'realm': {
       const subcmd = args[1]
       if (!subcmd) {
+        validateFlags('realm', args.slice(1))
         await showRealm()
       } else if (subcmd === 'set') {
+        validateFlags('realm set', args.slice(3))
         await setRealm()
       } else {
         die('Usage: ig realm [set <realm|identity|dataverse001>]')

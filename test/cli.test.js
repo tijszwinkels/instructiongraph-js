@@ -273,6 +273,16 @@ describe('CLI', () => {
     assert.ok(stdout.includes('POST'))
   })
 
+  it('ig search: rejects unknown flags', async () => {
+    await assert.rejects(
+      ig('search', '--realm', 'dataverse001'),
+      err => err.code === 1 &&
+        err.stderr.includes('Unknown option for \'search\'') &&
+        err.stderr.includes('--realm') &&
+        err.stderr.includes('ig search --help')
+    )
+  })
+
   it('ig --help: shows InstructionGraph description and base commands', async () => {
     const { stdout } = await ig('--help')
     assert.match(stdout, /InstructionGraph/i)
