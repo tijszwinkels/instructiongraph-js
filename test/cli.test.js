@@ -247,16 +247,26 @@ describe('CLI', () => {
     assert.equal(obj.item.revision, 42, 'should use explicit revision')
   })
 
-  it('ig create --update: creates normally when object does not exist', async () => {
+  it('ig create --update: fails when object does not exist', async () => {
     const specPath = join(projectDir, 'upd-new-spec.json')
     const fixedId = '44444444-4444-4444-4444-444444444444'
     await writeFile(specPath, JSON.stringify({ type: 'NOTE', id: fixedId, in: ['dataverse001'], content: { text: 'brand new' } }))
 
-    const { stdout } = await ig('create', specPath, '--update')
+    await assert.rejects(
+      ig('create', specPath, '--update'),
+      /not found.*cannot update/i
+    )
+  })
+
+  it('ig create: creates normally without --update even with explicit id', async () => {
+    const specPath = join(projectDir, 'new-with-id-spec.json')
+    const fixedId = '55555555-5555-5555-5555-555555555555'
+    await writeFile(specPath, JSON.stringify({ type: 'NOTE', id: fixedId, in: ['dataverse001'], content: { text: 'brand new' } }))
+
+    const { stdout } = await ig('create', specPath)
     const ref = stdout.trim()
     const obj = stored.get(ref)
     assert.equal(obj.item.content.text, 'brand new')
-    assert.ok(!obj.item.revision, 'new object should have no revision')
   })
 
   it('ig get: fetches from hub', async () => {

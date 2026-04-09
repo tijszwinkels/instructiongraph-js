@@ -118,8 +118,9 @@ export function createSyncStore({ local, remote, activePubkey = null, sharedReal
       let remoteResult = null
       try {
         remoteResult = await remote.get(ref, { localRevision: localRev })
-      } catch {
+      } catch (e) {
         // Hub unreachable — fall back to local
+        process.stderr.write(`⚠ Hub get failed: ${e.message} — using local copy\n`)
         return applyFilter(localObj, opts)
       }
 
@@ -168,27 +169,59 @@ export function createSyncStore({ local, remote, activePubkey = null, sharedReal
 
       // Skip remote push for identity-realm objects when not authenticated
       if (!shouldPushToRemote(signedObj)) {
-        return localResult
+        const reason = isLocalOnly(signedObj)
+          ? 'local-realm objects are never pushed'
+          : 'not authenticated for identity realm'
+        return { ...localResult, _remoteOk: false, _remoteError: reason }
       }
 
-      // Remote: non-fatal
+      // Remote push — surface failures visibly
+      let remoteResult = null
       try {
-        const remoteResult = await remote.put(signedObj)
-        if (remoteResult && !remoteResult.ok && remoteResult.status === 403) {
-          console.warn(`[sync] Server rejected object (403).`)
-        }
+        remoteResult = await remote.put(signedObj)
       } catch (e) {
-        console.warn(`[sync] remote put failed (non-fatal): ${e.message}`)
+        const ref = signedObj.item?.ref || '?'
+        process.stderr.write(`⚠ Hub push failed for ${ref}: ${e.message}\n`)
+        return { ...localResult, _remoteOk: false, _remoteError: e.message }
       }
 
-      return localResult
+      if (remoteResult && !remoteResult.ok) {
+        const ref = signedObj.item?.ref || '?'
+        const reason = remoteResult.error || `HTTP ${remoteResult.status}`
+        process.stderr.write(`⚠ Hub rejected ${ref}: ${reason}\n`)
+        return { ...localResult, _remoteOk: false, _remoteError: reason }
+      }
+
+      return { ...localResult, _remoteOk: true }
     },
 
     async search(query = {}) {
+      // Support --local / --remote source filtering
+      const source = query.source || 'both'
+      const _query = { ...query }
+      delete _query.source
+
+      if (source === 'local') {
+        return local.search(_query)
+      }
+      if (source === 'remote') {
+        try {
+          return await remote.search(_query)
+        } catch (e) {
+          throw new Error(`Hub search failed: ${e.message}`)
+        }
+      }
+
       // Query both in parallel
       const [localResult, remoteResult] = await Promise.all([
-        local.search(query).catch(() => ({ items: [], cursor: null })),
-        remote.search(query).catch(() => ({ items: [], cursor: null }))
+        local.search(_query).catch((e) => {
+          process.stderr.write(`⚠ Local search error: ${e.message}\n`)
+          return { items: [], cursor: null }
+        }),
+        remote.search(_query).catch((e) => {
+          process.stderr.write(`⚠ Hub search failed: ${e.message} — showing local results only\n`)
+          return { items: [], cursor: null }
+        })
       ])
 
       // Cache hub results locally (background)
@@ -309,10 +342,32 @@ export function createSyncStore({ local, remote, activePubkey = null, sharedReal
     },
 
     async inbound(ref, opts = {}) {
+      // Support --local / --remote source filtering
+      const source = opts.source || 'both'
+      const _opts = { ...opts }
+      delete _opts.source
+
+      if (source === 'local') {
+        return local.inbound(ref, _opts)
+      }
+      if (source === 'remote') {
+        try {
+          return await remote.inbound(ref, _opts)
+        } catch (e) {
+          throw new Error(`Hub inbound failed: ${e.message}`)
+        }
+      }
+
       // Query both in parallel
       const [localResult, remoteResult] = await Promise.all([
-        local.inbound(ref, opts).catch(() => ({ items: [], cursor: null })),
-        remote.inbound(ref, opts).catch(() => ({ items: [], cursor: null }))
+        local.inbound(ref, _opts).catch((e) => {
+          process.stderr.write(`⚠ Local inbound error: ${e.message}\n`)
+          return { items: [], cursor: null }
+        }),
+        remote.inbound(ref, _opts).catch((e) => {
+          process.stderr.write(`⚠ Hub inbound failed: ${e.message} — showing local results only\n`)
+          return { items: [], cursor: null }
+        })
       ])
 
       // Cache hub results locally (background)

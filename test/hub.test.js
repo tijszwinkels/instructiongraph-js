@@ -233,13 +233,34 @@ describe('hub store (mock server)', () => {
     assert.equal(putReqs.length, 0)
   })
 
+  it('search() preserves path prefix in base URL', async () => {
+    requests.length = 0
+    // Use hub.url + '/subpath' to simulate a reverse-proxy mount
+    const store = createHubStore({ url: hub.url + '/subpath' })
+    // This should hit /subpath/search, not /search
+    await store.search({ type: 'TEST' }).catch(() => {})
+    const searchReq = requests.find(r => r.path.includes('search'))
+    assert.ok(searchReq, 'should have made a search request')
+    assert.ok(searchReq.path.startsWith('/subpath/search'), `expected /subpath/search but got ${searchReq.path}`)
+  })
+
+  it('inbound() preserves path prefix in base URL', async () => {
+    requests.length = 0
+    const store = createHubStore({ url: hub.url + '/subpath' })
+    await store.inbound('pk.1', {}).catch(() => {})
+    const inboundReq = requests.find(r => r.path.includes('inbound'))
+    assert.ok(inboundReq, 'should have made an inbound request')
+    assert.ok(inboundReq.path.startsWith('/subpath/pk.1/inbound'), `expected /subpath/pk.1/inbound but got ${inboundReq.path}`)
+  })
+
   it('handles unreachable server gracefully', async () => {
     const store = createHubStore({ url: 'http://127.0.0.1:1' }) // nothing on port 1
-    assert.equal(await store.get('any.ref'), null)
+    // get, search, and inbound throw on network error (sync store catches and falls back)
+    await assert.rejects(() => store.get('any.ref'), /fetch failed|ECONNREFUSED/)
     const putResult = await store.put(FIXTURE)
     assert.ok(!putResult.ok)
-    const searchResult = await store.search({ type: 'TEST' })
-    assert.deepEqual(searchResult, { items: [], cursor: null })
+    await assert.rejects(() => store.search({ type: 'TEST' }), /fetch failed|ECONNREFUSED/)
+    await assert.rejects(() => store.inbound('any.ref', {}), /fetch failed|ECONNREFUSED/)
   })
 
   it('get() with localRevision sends If-None-Match and returns _notModified on 304', async () => {

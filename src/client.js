@@ -217,7 +217,19 @@ export function createClient(opts = {}) {
           const signed = await client.sign(item)
           const result = await client.publish(signed)
           if (!result.ok) throw new Error(`Publish failed: ${result.error || `status ${result.status}`}`)
+          if (opts.requirePush && result._remoteOk === false) {
+            throw new Error(`Hub push failed: ${result._remoteError || 'unknown error'}`)
+          }
           return signed.item.ref
+        }
+
+        // --update requested but object not found
+        if (opts.allowUpdate) {
+          throw new Error(
+            `Object ${existingRef} not found — cannot update.\n` +
+            `The object may exist on the hub but is not reachable (check auth/realm).\n` +
+            `To create a new object with this id, remove --update.`
+          )
         }
       }
 
@@ -227,6 +239,9 @@ export function createClient(opts = {}) {
       const signed = await client.sign(item)
       const result = await client.publish(signed)
       if (!result.ok) throw new Error(`Publish failed: ${result.error || `status ${result.status}`}`)
+      if (opts.requirePush && result._remoteOk === false) {
+        throw new Error(`Hub push failed: ${result._remoteError || 'unknown error'}`)
+      }
       return signed.item.ref
     },
 

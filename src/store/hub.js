@@ -45,23 +45,17 @@ export function createHubStore({ url, token = null }) {
      *   Returns { _notModified: true } on 304.
      */
     async get(ref, opts = {}) {
-      try {
-        const h = headers()
-        if (opts.localRevision != null) {
-          h['If-None-Match'] = `"${opts.localRevision}"`
-        }
-        const res = await fetch(`${baseUrl}/${ref}`, { headers: h })
-        if (res.status === 304) return { _notModified: true }
-        if (res.status === 404) return null
-        if (!res.ok) {
-          console.warn(`[hub] GET /${ref} failed: ${res.status}`)
-          return null
-        }
-        return await res.json()
-      } catch (e) {
-        console.warn(`[hub] GET /${ref} error: ${e.message}`)
-        return null
+      const h = headers()
+      if (opts.localRevision != null) {
+        h['If-None-Match'] = `"${opts.localRevision}"`
       }
+      const res = await fetch(`${baseUrl}/${ref}`, { headers: h })
+      if (res.status === 304) return { _notModified: true }
+      if (res.status === 404) return null
+      if (!res.ok) {
+        throw new Error(`hub GET /${ref} failed: HTTP ${res.status}`)
+      }
+      return await res.json()
     },
 
     async put(signedObj) {
@@ -95,20 +89,16 @@ export function createHubStore({ url, token = null }) {
       if (query.cursor) params.set('cursor', query.cursor)
       if (query.includeInboundCounts) params.set('include', 'inbound_counts')
 
-      try {
-        const res = await fetch(`${baseUrl}/search?${params}`, { headers: headers() })
-        if (!res.ok) {
-          console.warn(`[hub] search failed: ${res.status}`)
-          return { items: [], cursor: null }
-        }
-        const data = await res.json()
-        return {
-          items: data.items || [],
-          cursor: data.cursor || null
-        }
-      } catch (e) {
-        console.warn(`[hub] search error: ${e.message}`)
-        return { items: [], cursor: null }
+      const qs = params.toString()
+      const url = `${baseUrl}/search${qs ? '?' + qs : ''}`
+      const res = await fetch(url, { headers: headers() })
+      if (!res.ok) {
+        throw new Error(`hub search failed: HTTP ${res.status}`)
+      }
+      const data = await res.json()
+      return {
+        items: data.items || [],
+        cursor: data.cursor || null
       }
     },
 
@@ -121,21 +111,16 @@ export function createHubStore({ url, token = null }) {
       if (opts.cursor) params.set('cursor', opts.cursor)
       if (opts.includeInboundCounts) params.set('include', 'inbound_counts')
 
-      try {
-        const qs = params.toString()
-        const res = await fetch(`${baseUrl}/${ref}/inbound${qs ? '?' + qs : ''}`, { headers: headers() })
-        if (!res.ok) {
-          console.warn(`[hub] inbound /${ref} failed: ${res.status}`)
-          return { items: [], cursor: null }
-        }
-        const data = await res.json()
-        return {
-          items: data.items || [],
-          cursor: data.cursor || null
-        }
-      } catch (e) {
-        console.warn(`[hub] inbound error: ${e.message}`)
-        return { items: [], cursor: null }
+      const qs = params.toString()
+      const url = `${baseUrl}/${ref}/inbound${qs ? '?' + qs : ''}`
+      const res = await fetch(url, { headers: headers() })
+      if (!res.ok) {
+        throw new Error(`hub inbound failed: HTTP ${res.status}`)
+      }
+      const data = await res.json()
+      return {
+        items: data.items || [],
+        cursor: data.cursor || null
       }
     },
 
