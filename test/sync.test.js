@@ -183,7 +183,7 @@ describe('sync store', () => {
       assert.ok(remote.data['pk.new'])
     })
 
-    it('remote failure is non-fatal', async () => {
+    it('remote failure is non-fatal but surfaced', async () => {
       const local = createMockStore()
       const remote = createUnreachableStore()
       const sync = createSyncStore({ local, remote })
@@ -192,6 +192,19 @@ describe('sync store', () => {
       const result = await sync.put(obj)
       assert.ok(result.ok, 'should succeed locally')
       assert.ok(local.data['pk.offline'], 'local should have the object')
+      assert.equal(result._remoteOk, false, 'should indicate remote failure')
+      assert.ok(result._remoteError, 'should include error message')
+    })
+
+    it('reports _remoteOk: true on successful push', async () => {
+      const local = createMockStore()
+      const remote = createMockHubStore()
+      const sync = createSyncStore({ local, remote })
+
+      const obj = makeObj('pk.pushed', 0)
+      const result = await sync.put(obj)
+      assert.ok(result.ok, 'should succeed locally')
+      assert.equal(result._remoteOk, true, 'should indicate remote success')
     })
   })
 
@@ -235,6 +248,37 @@ describe('sync store', () => {
 
       const result = await sync.search({})
       assert.equal(result.items.length, 1)
+    })
+
+    it('source=local returns only local results', async () => {
+      const local = createMockStore({ 'pk.1': makeObj('pk.1', 1) })
+      const remote = createMockHubStore({ 'pk.2': makeObj('pk.2', 1) })
+      const sync = createSyncStore({ local, remote })
+
+      const result = await sync.search({ source: 'local' })
+      assert.equal(result.items.length, 1)
+      assert.equal(result.items[0].item.ref, 'pk.1')
+    })
+
+    it('source=remote returns only hub results', async () => {
+      const local = createMockStore({ 'pk.1': makeObj('pk.1', 1) })
+      const remote = createMockHubStore({ 'pk.2': makeObj('pk.2', 1) })
+      const sync = createSyncStore({ local, remote })
+
+      const result = await sync.search({ source: 'remote' })
+      assert.equal(result.items.length, 1)
+      assert.equal(result.items[0].item.ref, 'pk.2')
+    })
+
+    it('source=remote throws when hub is unreachable', async () => {
+      const local = createMockStore({ 'pk.1': makeObj('pk.1', 1) })
+      const remote = createUnreachableStore()
+      const sync = createSyncStore({ local, remote })
+
+      await assert.rejects(
+        () => sync.search({ source: 'remote' }),
+        /Hub search failed/
+      )
     })
   })
 
@@ -372,10 +416,12 @@ describe('sync store', () => {
       const sync = createSyncStore({ local, remote })
 
       const privateObj = makeObj('pk.1', 1, ['mypubkey'])
-      await sync.put(privateObj)
+      const result = await sync.put(privateObj)
 
       assert.ok(local.data['pk.1'], 'should store locally')
       assert.ok(!remote.data['pk.1'], 'should NOT push to remote')
+      assert.equal(result._remoteOk, false, 'should indicate remote was skipped')
+      assert.ok(result._remoteError, 'should include skip reason')
     })
 
     it('put: pushes identity-realm objects when authenticated', async () => {
@@ -450,10 +496,12 @@ describe('sync store', () => {
       const sync = createSyncStore({ local, remote })
 
       const localObj = makeObj('pk.1', 1, ['local'])
-      await sync.put(localObj)
+      const result = await sync.put(localObj)
 
       assert.ok(local.data['pk.1'], 'should store locally')
       assert.ok(!remote.data['pk.1'], 'should NOT push local realm to remote')
+      assert.equal(result._remoteOk, false, 'should indicate remote was skipped')
+      assert.match(result._remoteError, /local-realm/, 'should explain why skipped')
     })
 
     it('put: never pushes mixed local+public realm objects', async () => {
@@ -463,10 +511,11 @@ describe('sync store', () => {
       const sync = createSyncStore({ local, remote })
 
       const mixedObj = makeObj('pk.1', 1, ['local', 'dataverse001'])
-      await sync.put(mixedObj)
+      const result = await sync.put(mixedObj)
 
       assert.ok(local.data['pk.1'], 'should store locally')
       assert.ok(!remote.data['pk.1'], 'should NOT push when local realm present')
+      assert.equal(result._remoteOk, false, 'should indicate remote was skipped')
     })
 
     it('get: does not push local realm objects to hub on 404', async () => {
@@ -551,10 +600,11 @@ describe('sync store', () => {
       const sync = createSyncStore({ local, remote })
 
       const mixedObj = makeObj('pk.1', 1, ['server-public', 'mypubkey'])
-      await sync.put(mixedObj)
+      const result = await sync.put(mixedObj)
 
       assert.ok(local.data['pk.1'], 'should store locally')
       assert.ok(!remote.data['pk.1'], 'should NOT push when identity realm present and not authenticated')
+      assert.equal(result._remoteOk, false, 'should indicate remote was skipped')
     })
   })
 

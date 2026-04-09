@@ -117,8 +117,8 @@ Run 'ig <command> --help' for command-specific help.`)
 function commandUsage(command) {
   const docs = {
     get: `Usage: ig get <ref> [--identity N] [--raw]\n\nFetch an object by ref and print its JSON envelope.\n\nFlags:\n  --identity N  Authenticate as identity N to access private objects\n  --raw         Skip realm filtering (show objects from any realm)`,
-    search: `Usage: ig search [--type T] [--by PK] [--limit N] [--cursor C] [--counts] [--jsonl] [--raw]\n\nSearch objects on the configured hub/store.\n\nFlags:\n  --type T     Filter by object type\n  --by PK      Filter by pubkey\n  --limit N    Max results (default: 20)\n  --cursor C   Pagination cursor from previous result\n  --counts     Include inbound relation counts\n  --jsonl      Output one JSON envelope per line (JSONL)\n  --raw        Skip realm filtering (show objects from any realm)`,
-    inbound: `Usage: ig inbound <ref> [--relation R] [--type T] [--from PK] [--limit N] [--cursor C] [--counts] [--jsonl] [--raw]\n\nList objects that point to the target ref.\n\nFlags:\n  --relation R  Filter by relation name\n  --type T      Filter by source object type\n  --from PK     Filter by source object pubkey\n  --limit N     Max results (default: 20)\n  --cursor C    Pagination cursor from previous result\n  --counts      Include inbound relation counts\n  --jsonl       Output one JSON envelope per line (JSONL)\n  --raw         Skip realm filtering (show objects from any realm)`,
+    search: `Usage: ig search [--type T] [--by PK] [--limit N] [--cursor C] [--counts] [--jsonl] [--raw] [--local] [--remote]\n\nSearch objects on the configured hub/store.\n\nFlags:\n  --type T     Filter by object type\n  --by PK      Filter by pubkey\n  --limit N    Max results (default: 20)\n  --cursor C   Pagination cursor from previous result\n  --counts     Include inbound relation counts\n  --jsonl      Output one JSON envelope per line (JSONL)\n  --raw        Skip realm filtering (show objects from any realm)\n  --local      Search local store only (skip hub)\n  --remote     Search hub only (skip local)`,
+    inbound: `Usage: ig inbound <ref> [--relation R] [--type T] [--from PK] [--limit N] [--cursor C] [--counts] [--jsonl] [--raw] [--local] [--remote]\n\nList objects that point to the target ref.\n\nFlags:\n  --relation R  Filter by relation name\n  --type T      Filter by source object type\n  --from PK     Filter by source object pubkey\n  --limit N     Max results (default: 20)\n  --cursor C    Pagination cursor from previous result\n  --counts      Include inbound relation counts\n  --jsonl       Output one JSON envelope per line (JSONL)\n  --raw         Skip realm filtering (show objects from any realm)\n  --local       Search local store only (skip hub)\n  --remote      Search hub only (skip local)`,
     verify: `Usage: ig verify <file.json>\n\nVerify an instructionGraph001 envelope on disk.`,
     sign: `Usage: ig sign <spec.json>\n\nBuild and sign a spec, then print the canonical envelope JSON.`,
     create: `Usage: ig create <spec.json> [--update] [--identity N] [--realm R] [--push] [--no-push]\n\nBuild, sign, and publish a spec to the configured store.\n\nSpec format (JSON):\n  All fields are optional. Auto-filled: id, pubkey, ref, in, created_at,\n  relations.author. Recommended:\n    type         Object type (e.g. POST, NOTE, COMMENT)\n    name         Short human-readable label\n    instruction  How agents should interpret/display this object\n    content      Free-form payload (e.g. { "title": "...", "body": "..." })\n  Other fields:\n    id           UUID (auto-generated if omitted)\n    in           Realm array (default: your active realm)\n    relations    Named arrays of { ref } links to other objects\n    rights       { license, ai_training_allowed }\n\n  The instruction field is key — it makes objects self-describing so any\n  agent (human or LLM) can understand them without external docs.\n\n  If using a type, add a type_def relation so the schema is validated:\n    "relations": { "type_def": [{ "ref": "<pubkey>.<type-uuid>" }] }\n\n  Structural objects should include a root relation for discoverability:\n    "relations": { "root": [{ "ref": "AxyU5_...00000000-...",\n      "url": "https://dataverse001.net/AxyU5_...00000000-..." }] }\n\nExample:\n  {\n    "type": "POST",\n    "name": "Hello",\n    "instruction": "A post. Display title and body.",\n    "content": { "title": "Hello!", "body": "First post!" }\n  }\n\nFlags:\n  --update      Allow updating existing objects (auto-increments revision,\n                sets updated_at). Without this, fails if object exists.\n  --identity N  Sign with identity N instead of active identity\n  --realm R     Override default realm (e.g. dataverse001, identity)\n  --push        Push to server (auto-login if needed for identity realm)\n  --no-push     Store locally only, skip server push`,
@@ -916,17 +916,30 @@ async function main() {
 
     case 'search': {
       validateFlags('search', args.slice(1), {
-        booleanFlags: ['counts', 'json', 'jsonl', 'raw'],
+        booleanFlags: ['counts', 'json', 'jsonl', 'raw', 'local', 'remote'],
         valueFlags: ['by', 'cursor', 'limit', 'type']
       })
       const raw = args.includes('--raw')
+      const wantLocal = args.includes('--local')
+      const wantRemote = args.includes('--remote')
       const ctx = await makeClient({ skipRealmCheck: raw })
+      const isSyncStore = !!ctx.store.setRealmContext
+      // Validate source flags against store type
+      if (wantLocal && !isSyncStore && ctx.isOnline) {
+        die('--local requires a local data directory. Run \'ig identity generate\' first.')
+      }
+      if (wantRemote && !ctx.isOnline) {
+        die('--remote requires a server. Run \'ig server set <url>\' first.')
+      }
+      // Only pass source to sync store; bare stores already do the right thing
+      const source = isSyncStore ? (wantLocal ? 'local' : wantRemote ? 'remote' : 'both') : undefined
       const result = await ctx.client.search({
         type: flag('type'),
         by: flag('by'),
         limit: flag('limit') ? parseInt(flag('limit')) : 20,
         cursor: flag('cursor'),
-        includeInboundCounts: args.includes('--counts')
+        includeInboundCounts: args.includes('--counts'),
+        ...(source && { source })
       })
       if (args.includes('--jsonl') || args.includes('--json')) {
         for (const item of result.items) console.log(canonicalJSON(item))
@@ -949,18 +962,29 @@ async function main() {
       const ref = args[1]
       if (!ref) die('Usage: ig inbound <ref>')
       validateFlags('inbound', args.slice(2), {
-        booleanFlags: ['counts', 'json', 'jsonl', 'raw'],
+        booleanFlags: ['counts', 'json', 'jsonl', 'raw', 'local', 'remote'],
         valueFlags: ['cursor', 'from', 'limit', 'relation', 'type']
       })
       const raw = args.includes('--raw')
+      const wantLocal = args.includes('--local')
+      const wantRemote = args.includes('--remote')
       const ctx = await makeClient({ skipRealmCheck: raw })
+      const isSyncStore = !!ctx.store.setRealmContext
+      if (wantLocal && !isSyncStore && ctx.isOnline) {
+        die('--local requires a local data directory. Run \'ig identity generate\' first.')
+      }
+      if (wantRemote && !ctx.isOnline) {
+        die('--remote requires a server. Run \'ig server set <url>\' first.')
+      }
+      const source = isSyncStore ? (wantLocal ? 'local' : wantRemote ? 'remote' : 'both') : undefined
       const result = await ctx.client.inbound(ref, {
         relation: flag('relation'),
         type: flag('type'),
         from: flag('from'),
         limit: flag('limit') ? parseInt(flag('limit')) : 20,
         cursor: flag('cursor'),
-        includeInboundCounts: args.includes('--counts')
+        includeInboundCounts: args.includes('--counts'),
+        ...(source && { source })
       })
       if (args.includes('--jsonl') || args.includes('--json')) {
         for (const item of result.items) console.log(canonicalJSON(item))
@@ -1041,8 +1065,13 @@ async function main() {
             `Your pubkey: ${signerPubkey}`)
       }
 
-      // If --push with identity realm and not logged in, auto-authenticate
-      const hasIdentityRealm = specRealms.some(r => r !== 'dataverse001' && r !== 'local' && r !== 'server-public' && r.length === 44)
+      // If --push with identity realm and not logged in, auto-authenticate.
+      // Compute the effective realms that buildItem would produce (spec.in → --realm → default realm → pubkey).
+      const effectiveRealms = specRealms.length > 0
+        ? specRealms
+        : [realm || readConfig(ctx.configDir, 'default-realm', null) || signerPubkey]
+      const hasIdentityRealm = effectiveRealms.some(r =>
+        r !== 'dataverse001' && r !== 'local' && r !== 'server-public' && r.length === 44)
       if (forcePush && hasIdentityRealm && ctx.isOnline) {
         const savedToken = readConfig(ctx.configDir, 'auth-token', null)
         if (!savedToken) {
@@ -1076,6 +1105,8 @@ async function main() {
             item.created_at = existing.item.created_at
             item.revision = spec.revision ?? (existing.item.revision || 0) + 1
             item.updated_at = spec.updated_at ?? isoNow()
+          } else {
+            die(`Object ${item.ref} not found locally — cannot update.\nTo create a new object with this id, remove --update.`)
           }
         }
 
@@ -1086,7 +1117,7 @@ async function main() {
         console.log(signed.item.ref)
       } else {
         // Normal path: client.create handles existence check + update logic
-        const ref = await ctx.client.create(spec, { allowUpdate })
+        const ref = await ctx.client.create(spec, { allowUpdate, requirePush: forcePush })
         console.log(ref)
       }
       break
