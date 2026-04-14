@@ -180,15 +180,63 @@ describe('CLI', () => {
     await access(localPath) // throws if missing
   })
 
-  it('ig create: rejects foreign identity realm', async () => {
+  it('ig create --realm identity: expands to pubkey instead of literal string', async () => {
+    // Use ig sign to verify realm expansion without needing hub push
+    const specPath = join(projectDir, 'realm-identity-spec.json')
+    await writeFile(specPath, JSON.stringify({ type: 'NOTE', content: { text: 'identity realm test' } }))
+
+    const { stdout } = await ig('sign', specPath)
+    const defaultPubkey = JSON.parse(stdout).item.pubkey
+
+    // Now create with --realm identity --no-push and check the local file
+    await ig('create', specPath, '--realm', 'identity', '--no-push')
+
+    // Read the stored file from the local data dir
+    const { readdir, readFile: rf } = await import('node:fs/promises')
+    const dataDir = join(projectDir, '.instructionGraph', 'data')
+    const files = await readdir(dataDir)
+    // Find the file for this object by checking all files for our content
+    let found = null
+    for (const f of files) {
+      const content = await rf(join(dataDir, f), 'utf-8')
+      const obj = JSON.parse(content)
+      if (obj.item?.content?.text === 'identity realm test') {
+        found = obj
+        break
+      }
+    }
+    assert.ok(found, 'object was stored locally')
+    assert.ok(!found.item.in.includes('identity'), 'should not contain literal "identity" in realms')
+    assert.ok(found.item.in[0].length === 44, 'realm should be a 44-char pubkey')
+    assert.equal(found.item.in[0], defaultPubkey, 'identity realm should match signer pubkey')
+  })
+
+  it('ig sign --identity: signs with alternate identity', async () => {
+    const specPath = join(projectDir, 'sign-alt-spec.json')
+    await writeFile(specPath, JSON.stringify({ type: 'NOTE', content: { text: 'signed by alt' } }))
+
+    // Sign with default identity
+    const { stdout: defaultSigned } = await ig('sign', specPath)
+    const defaultObj = JSON.parse(defaultSigned)
+
+    // Sign with alt identity
+    const { stdout: altSigned } = await ig('sign', specPath, '--identity', 'alt')
+    const altObj = JSON.parse(altSigned)
+
+    // Pubkeys should differ
+    assert.notEqual(defaultObj.item.pubkey, altObj.item.pubkey, 'alt identity should have different pubkey')
+    // Both should be valid signatures
+    assert.ok(await verify(defaultObj.item.pubkey, defaultObj.signature, defaultObj.item), 'default signed object should verify')
+    assert.ok(await verify(altObj.item.pubkey, altObj.signature, altObj.item), 'alt signed object should verify')
+  })
+
+  it('ig create: warns on foreign identity realm but succeeds', async () => {
     const specPath = join(projectDir, 'foreign-spec.json')
     const fakePubkey = 'Axxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx'
-    await writeFile(specPath, JSON.stringify({ type: 'NOTE', in: [fakePubkey], content: { text: 'sneaky' } }))
+    await writeFile(specPath, JSON.stringify({ type: 'NOTE', in: [fakePubkey], content: { text: 'cross-realm' } }))
 
-    await assert.rejects(
-      ig('create', specPath),
-      err => err.stderr.includes('belongs to a different pubkey')
-    )
+    const result = await ig('create', specPath)
+    assert.ok(result.stderr.includes('Warning: pushing to identity realm'), 'should warn about foreign realm')
   })
 
   it('ig create: fails when object with same id already exists', async () => {
