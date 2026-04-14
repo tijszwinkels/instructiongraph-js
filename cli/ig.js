@@ -1077,13 +1077,12 @@ async function main() {
       const ctx = await makeClient({ identityName, realm: effectiveLocalRealm ? 'local' : realm })
       printStatus(ctx)
 
-      // Pre-check: can't target someone else's identity realm
+      // Warn when targeting another identity's realm (hub may accept or reject depending on config)
       const specRealms = spec.in || []
       const signerPubkey = ctx.client.pubkey
       const foreignIdentityRealm = specRealms.find(r => r !== 'dataverse001' && r !== 'local' && r !== 'server-public' && r.length === 44 && r !== signerPubkey)
       if (foreignIdentityRealm) {
-        die(`Cannot create in identity realm ${foreignIdentityRealm} \u2014 it belongs to a different pubkey.\n` +
-            `Your pubkey: ${signerPubkey}`)
+        console.error(`Warning: pushing to identity realm ${foreignIdentityRealm} (not your own pubkey).`)
       }
 
       // If --push with identity realm and not logged in, auto-authenticate.

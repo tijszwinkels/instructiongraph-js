@@ -211,15 +211,13 @@ describe('CLI', () => {
     assert.equal(found.item.in[0], defaultPubkey, 'identity realm should match signer pubkey')
   })
 
-  it('ig create: rejects foreign identity realm', async () => {
+  it('ig create: warns on foreign identity realm but succeeds', async () => {
     const specPath = join(projectDir, 'foreign-spec.json')
     const fakePubkey = 'Axxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx'
-    await writeFile(specPath, JSON.stringify({ type: 'NOTE', in: [fakePubkey], content: { text: 'sneaky' } }))
+    await writeFile(specPath, JSON.stringify({ type: 'NOTE', in: [fakePubkey], content: { text: 'cross-realm' } }))
 
-    await assert.rejects(
-      ig('create', specPath),
-      err => err.stderr.includes('belongs to a different pubkey')
-    )
+    const result = await ig('create', specPath)
+    assert.ok(result.stderr.includes('Warning: pushing to identity realm'), 'should warn about foreign realm')
   })
 
   it('ig create: fails when object with same id already exists', async () => {
