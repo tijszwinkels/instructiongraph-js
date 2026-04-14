@@ -211,6 +211,25 @@ describe('CLI', () => {
     assert.equal(found.item.in[0], defaultPubkey, 'identity realm should match signer pubkey')
   })
 
+  it('ig sign --identity: signs with alternate identity', async () => {
+    const specPath = join(projectDir, 'sign-alt-spec.json')
+    await writeFile(specPath, JSON.stringify({ type: 'NOTE', content: { text: 'signed by alt' } }))
+
+    // Sign with default identity
+    const { stdout: defaultSigned } = await ig('sign', specPath)
+    const defaultObj = JSON.parse(defaultSigned)
+
+    // Sign with alt identity
+    const { stdout: altSigned } = await ig('sign', specPath, '--identity', 'alt')
+    const altObj = JSON.parse(altSigned)
+
+    // Pubkeys should differ
+    assert.notEqual(defaultObj.item.pubkey, altObj.item.pubkey, 'alt identity should have different pubkey')
+    // Both should be valid signatures
+    assert.ok(await verify(defaultObj.item.pubkey, defaultObj.signature, defaultObj.item), 'default signed object should verify')
+    assert.ok(await verify(altObj.item.pubkey, altObj.signature, altObj.item), 'alt signed object should verify')
+  })
+
   it('ig create: warns on foreign identity realm but succeeds', async () => {
     const specPath = join(projectDir, 'foreign-spec.json')
     const fakePubkey = 'Axxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx'
