@@ -198,6 +198,26 @@ function writeConfig(configDir, name, value) {
   writeFileSync(join(configPath, name), `${value}\n`)
 }
 
+/**
+ * Resolve well-known realm aliases (e.g. 'identity') to their actual values.
+ * @param {string|undefined} realm - Raw realm string from --realm flag
+ * @param {string} configDir - Config directory for identity lookup
+ * @param {string|null} [identityName] - Explicit identity name (from --identity flag)
+ * @returns {Promise<string|undefined>} Resolved realm string, or undefined if input was undefined
+ */
+async function resolveRealmAlias(realm, configDir, identityName) {
+  if (realm === undefined) return undefined
+  if (realm === 'identity') {
+    const name = identityName || readConfig(configDir, 'active-identity', 'default')
+    const pemPath = resolveIdentityPemPath(configDir, name)
+    if (!pemPath) die(`No identity '${name}' found. Run 'ig identity generate' first.`)
+    const { importPEM } = await import('../src/identity.js')
+    const kp = await importPEM(readFileSync(pemPath, 'utf-8'))
+    return kp.pubkey
+  }
+  return realm
+}
+
 function resolveIdentityPemPath(configDir, identityName) {
   const candidates = [join(configDir, 'identities', identityName, 'private.pem')]
   if (!process.env.INSTRUCTIONGRAPH_DIR) {
@@ -1042,7 +1062,8 @@ async function main() {
       })
 
       const identityName = flag('identity')
-      const realm = flag('realm')
+      const rawRealm = flag('realm')
+      const realm = await resolveRealmAlias(rawRealm, findConfigDir(), identityName)
       const noPush = args.includes('--no-push')
       const forcePush = args.includes('--push')
       const allowUpdate = args.includes('--update')
