@@ -40,6 +40,27 @@ function flag(name) {
   return args[idx + 1]
 }
 
+/**
+ * Pull positional arguments out of argv, skipping flags and their values.
+ * @param {string[]} argv - args slice (excluding the command name)
+ * @param {string[]} valueFlags - flag names that take a value (without leading --)
+ * @returns {string[]}
+ */
+function positionals(argv, valueFlags = []) {
+  const valueFlagSet = new Set(valueFlags.map(f => `--${f}`))
+  const out = []
+  for (let i = 0; i < argv.length; i++) {
+    const t = argv[i]
+    if (t === '--help' || t === '-h') continue
+    if (t.startsWith('-')) {
+      if (valueFlagSet.has(t)) i++  // skip the flag's value
+      continue
+    }
+    out.push(t)
+  }
+  return out
+}
+
 function die(msg) {
   console.error(`Error: ${msg}`)
   process.exit(1)
@@ -87,8 +108,8 @@ Usage:
 Commands:
   ig status                        Show full configuration status
   ig get <ref> [--identity N]      Fetch object (auth as identity for private)
-  ig search [options]              Search objects
-  ig inbound <ref> [options]       Inbound relations
+  ig search [--identity N] [opts]  Search objects
+  ig inbound <ref> [--identity N]  Inbound relations
   ig verify <file.json>            Verify signature
   ig sign <spec.json> [--identity N]  Sign spec, print envelope
   ig create <spec.json> [options]  Sign and publish
@@ -117,13 +138,13 @@ Run 'ig <command> --help' for command-specific help.`)
 function commandUsage(command) {
   const docs = {
     get: `Usage: ig get <ref> [--identity N] [--raw]\n\nFetch an object by ref and print its JSON envelope.\n\nFlags:\n  --identity N  Authenticate as identity N to access private objects\n  --raw         Skip realm filtering (show objects from any realm)`,
-    search: `Usage: ig search [--type T] [--by PK] [--limit N] [--cursor C] [--counts] [--jsonl] [--raw] [--local] [--remote]\n\nSearch objects on the configured hub/store.\n\nFlags:\n  --type T     Filter by object type\n  --by PK      Filter by pubkey\n  --limit N    Max results (default: 20)\n  --cursor C   Pagination cursor from previous result\n  --counts     Include inbound relation counts\n  --jsonl      Output one JSON envelope per line (JSONL)\n  --raw        Skip realm filtering (show objects from any realm)\n  --local      Search local store only (skip hub)\n  --remote     Search hub only (skip local)`,
-    inbound: `Usage: ig inbound <ref> [--relation R] [--type T] [--from PK] [--limit N] [--cursor C] [--counts] [--jsonl] [--raw] [--local] [--remote]\n\nList objects that point to the target ref.\n\nFlags:\n  --relation R  Filter by relation name\n  --type T      Filter by source object type\n  --from PK     Filter by source object pubkey\n  --limit N     Max results (default: 20)\n  --cursor C    Pagination cursor from previous result\n  --counts      Include inbound relation counts\n  --jsonl       Output one JSON envelope per line (JSONL)\n  --raw         Skip realm filtering (show objects from any realm)\n  --local       Search local store only (skip hub)\n  --remote      Search hub only (skip local)`,
+    search: `Usage: ig search [--type T] [--by PK] [--limit N] [--cursor C] [--identity N] [--counts] [--jsonl] [--raw] [--local] [--remote]\n\nSearch objects on the configured hub/store.\n\nFlags:\n  --type T      Filter by object type\n  --by PK       Filter by pubkey\n  --limit N     Max results (default: 20)\n  --cursor C    Pagination cursor from previous result\n  --identity N  Authenticate as identity N to access private objects\n  --counts      Include inbound relation counts\n  --jsonl       Output one JSON envelope per line (JSONL)\n  --raw         Skip realm filtering (show objects from any realm)\n  --local       Search local store only (skip hub)\n  --remote      Search hub only (skip local)`,
+    inbound: `Usage: ig inbound <ref> [--relation R] [--type T] [--from PK] [--limit N] [--cursor C] [--identity N] [--counts] [--jsonl] [--raw] [--local] [--remote]\n\nList objects that point to the target ref.\n\nFlags:\n  --relation R  Filter by relation name\n  --type T      Filter by source object type\n  --from PK     Filter by source object pubkey\n  --limit N     Max results (default: 20)\n  --cursor C    Pagination cursor from previous result\n  --identity N  Authenticate as identity N to access private objects\n  --counts      Include inbound relation counts\n  --jsonl       Output one JSON envelope per line (JSONL)\n  --raw         Skip realm filtering (show objects from any realm)\n  --local       Search local store only (skip hub)\n  --remote      Search hub only (skip local)`,
     verify: `Usage: ig verify <file.json>\n\nVerify an instructionGraph001 envelope on disk.`,
     sign: `Usage: ig sign <spec.json> [--identity N]\n\nBuild and sign a spec, then print the canonical envelope JSON.\n\nFlags:\n  --identity N  Sign with identity N instead of active identity`,
     create: `Usage: ig create <spec.json> [--update] [--identity N] [--realm R] [--push] [--no-push]\n\nBuild, sign, and publish a spec to the configured store.\n\nSpec format (JSON):\n  All fields are optional. Auto-filled: id, pubkey, ref, in, created_at,\n  relations.author. Recommended:\n    type         Object type (e.g. POST, NOTE, COMMENT)\n    name         Short human-readable label\n    instruction  How agents should interpret/display this object\n    content      Free-form payload (e.g. { "title": "...", "body": "..." })\n  Other fields:\n    id           UUID (auto-generated if omitted)\n    in           Realm array (default: your active realm)\n    relations    Named arrays of { ref } links to other objects\n    rights       { license, ai_training_allowed }\n\n  The instruction field is key — it makes objects self-describing so any\n  agent (human or LLM) can understand them without external docs.\n\n  If using a type, add a type_def relation so the schema is validated:\n    "relations": { "type_def": [{ "ref": "<pubkey>.<type-uuid>" }] }\n\n  Structural objects should include a root relation for discoverability:\n    "relations": { "root": [{ "ref": "AxyU5_...00000000-...",\n      "url": "https://dataverse001.net/AxyU5_...00000000-..." }] }\n\nExample:\n  {\n    "type": "POST",\n    "name": "Hello",\n    "instruction": "A post. Display title and body.",\n    "content": { "title": "Hello!", "body": "First post!" }\n  }\n\nFlags:\n  --update      Allow updating existing objects (auto-increments revision,\n                sets updated_at). Without this, fails if object exists.\n  --identity N  Sign with identity N instead of active identity\n  --realm R     Override default realm (e.g. dataverse001, identity)\n  --push        Push to server (auto-login if needed for identity realm)\n  --no-push     Store locally only, skip server push`,
 
-    identity: `Usage: ig identity [generate|activate|list] [options]\n\nShow or manage the active identity.\n\nSubcommands:\n  ig identity generate [--name N] [--project] [--activate]\n  ig identity activate <name>\n  ig identity list\n\nEnvironment:\n  INSTRUCTIONGRAPH_DIR  Override config directory location`,
+    identity: `Usage: ig identity [generate|activate|list] [options]\n\nShow or manage the active identity.\n\nFlags:\n  --identity N  Show info for identity N instead of the active one\n\nSubcommands:\n  ig identity generate [--name N] [--project] [--activate]\n  ig identity activate <name>\n  ig identity list\n\nEnvironment:\n  INSTRUCTIONGRAPH_DIR  Override config directory location`,
     server: `Usage: ig server [set <url> | login | logout | remove | push]\n\nShow, configure, or remove the hub server connection.\n\nSubcommands:\n  ig server              Show current server status and auth\n  ig server set <url>    Connect to a hub server for sync\n  ig server login        Log in with your active identity\n  ig server logout       Log out from the hub\n  ig server remove       Disconnect and go offline\n  ig server push [--all]  Push local objects (default: your realms only)\n\nWithout a server, all data stays on local filesystem only.\nWith a server, objects sync between local storage and the hub.\nLogin uses your active identity (see ig identity).`,
     realm: `Usage: ig realm [set <realm|identity|dataverse001|server-public|local>]\n\nShow or set the default realm used for new objects.\n\n  ig realm set identity       Use current identity\'s realm (private)\n  ig realm set dataverse001   Use the public dataverse realm\n  ig realm set server-public  Public on this hub, not propagated globally\n  ig realm set local          Local only \u2014 never synced to any server\n  ig realm set <pubkey>       Use any specific realm`
   }
@@ -921,9 +942,9 @@ async function main() {
     }
 
     case 'get': {
-      const ref = args[1]
+      validateFlags('get', args.slice(1), { booleanFlags: ['raw'], valueFlags: ['identity'] })
+      const [ref] = positionals(args.slice(1), ['identity'])
       if (!ref) die('Usage: ig get <ref>')
-      validateFlags('get', args.slice(2), { booleanFlags: ['raw'], valueFlags: ['identity'] })
 
       const identityName = flag('identity')
       const raw = args.includes('--raw')
@@ -937,12 +958,13 @@ async function main() {
     case 'search': {
       validateFlags('search', args.slice(1), {
         booleanFlags: ['counts', 'json', 'jsonl', 'raw', 'local', 'remote'],
-        valueFlags: ['by', 'cursor', 'limit', 'type']
+        valueFlags: ['by', 'cursor', 'identity', 'limit', 'type']
       })
+      const identityName = flag('identity')
       const raw = args.includes('--raw')
       const wantLocal = args.includes('--local')
       const wantRemote = args.includes('--remote')
-      const ctx = await makeClient({ skipRealmCheck: raw })
+      const ctx = await makeClient({ identityName, authenticate: !!identityName && !wantLocal, skipRealmCheck: raw })
       const isSyncStore = !!ctx.store.setRealmContext
       // Validate source flags against store type
       if (wantLocal && !isSyncStore && ctx.isOnline) {
@@ -979,16 +1001,18 @@ async function main() {
     }
 
     case 'inbound': {
-      const ref = args[1]
-      if (!ref) die('Usage: ig inbound <ref>')
-      validateFlags('inbound', args.slice(2), {
+      const inboundValueFlags = ['cursor', 'from', 'identity', 'limit', 'relation', 'type']
+      validateFlags('inbound', args.slice(1), {
         booleanFlags: ['counts', 'json', 'jsonl', 'raw', 'local', 'remote'],
-        valueFlags: ['cursor', 'from', 'limit', 'relation', 'type']
+        valueFlags: inboundValueFlags
       })
+      const [ref] = positionals(args.slice(1), inboundValueFlags)
+      if (!ref) die('Usage: ig inbound <ref>')
+      const identityName = flag('identity')
       const raw = args.includes('--raw')
       const wantLocal = args.includes('--local')
       const wantRemote = args.includes('--remote')
-      const ctx = await makeClient({ skipRealmCheck: raw })
+      const ctx = await makeClient({ identityName, authenticate: !!identityName && !wantLocal, skipRealmCheck: raw })
       const isSyncStore = !!ctx.store.setRealmContext
       if (wantLocal && !isSyncStore && ctx.isOnline) {
         die('--local requires a local data directory. Run \'ig identity generate\' first.')
@@ -1166,9 +1190,17 @@ async function main() {
         validateFlags('identity list', args.slice(2))
         identityList()
       } else {
-        validateFlags('identity', args.slice(1))
+        validateFlags('identity', args.slice(1), { valueFlags: ['identity'] })
         const configDir = findConfigDir()
-        const identityConfig = resolveIdentityConfig(configDir)
+        const requested = flag('identity')
+        let identityConfig
+        if (requested) {
+          const pemPath = resolveIdentityPemPath(configDir, requested)
+          identityConfig = pemPath ? { type: 'pem-file', path: pemPath, name: requested } : null
+          if (!identityConfig) die(`No identity '${requested}' found. Run 'ig identity list' to see available identities.`)
+        } else {
+          identityConfig = resolveIdentityConfig(configDir)
+        }
         if (identityConfig) {
           const { importPEM } = await import('../src/identity.js')
           const pem = readFileSync(identityConfig.path, 'utf-8')

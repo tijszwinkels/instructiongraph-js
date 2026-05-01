@@ -24,7 +24,7 @@ async function readBody(req) {
 }
 
 describe('CLI', () => {
-  let hub, projectDir, stored
+  let hub, projectDir, stored, lastSearchAuth, lastInboundAuth
 
   before(async () => {
     stored = new Map()
@@ -43,8 +43,14 @@ describe('CLI', () => {
         return res.end(JSON.stringify({ token: 'cli-token', expires_at: '2026-04-02T00:00:00Z' }))
       }
       if (req.method === 'GET' && url.pathname === '/search') {
+        lastSearchAuth = req.headers['authorization'] || null
         res.writeHead(200, { 'Content-Type': 'application/json' })
         return res.end(JSON.stringify({ items: [...stored.values()], cursor: null }))
+      }
+      if (req.method === 'GET' && url.pathname.endsWith('/inbound')) {
+        lastInboundAuth = req.headers['authorization'] || null
+        res.writeHead(200, { 'Content-Type': 'application/json' })
+        return res.end(JSON.stringify({ items: [], cursor: null }))
       }
       if (req.method === 'GET' && stored.has(url.pathname.slice(1))) {
         res.writeHead(200, { 'Content-Type': 'application/json' })
@@ -325,6 +331,22 @@ describe('CLI', () => {
     assert.equal(obj.item.ref, ref)
   })
 
+  it('ig get --identity: authenticates and fetches with --identity before ref', async () => {
+    // Use a public dataverse001 object so the realm filter doesn't hide it under a different identity
+    const publicRef = [...stored.entries()].find(([, v]) => (v.item.in || []).includes('dataverse001'))?.[0]
+    assert.ok(publicRef, 'a public stored object should exist for this test')
+    const { stdout } = await ig('get', '--identity', 'alt', publicRef)
+    const obj = JSON.parse(stdout)
+    assert.equal(obj.item.ref, publicRef)
+  })
+
+  it('ig inbound --identity: accepts --identity before ref', async () => {
+    lastInboundAuth = null
+    await ig('inbound', '--identity', 'alt', 'some.ref')
+    assert.ok(lastInboundAuth, 'inbound request should include Authorization header')
+    assert.match(lastInboundAuth, /^Bearer /, 'should use Bearer token')
+  })
+
   it('ig search: lists objects', async () => {
     const { stdout } = await ig('search', '--type', 'POST')
     // search output is one-line-per-result format
@@ -339,6 +361,20 @@ describe('CLI', () => {
         err.stderr.includes('--realm') &&
         err.stderr.includes('ig search --help')
     )
+  })
+
+  it('ig search --identity: authenticates as specified identity', async () => {
+    lastSearchAuth = null
+    await ig('search', '--identity', 'alt')
+    assert.ok(lastSearchAuth, 'search request should include Authorization header')
+    assert.match(lastSearchAuth, /^Bearer /, 'should use Bearer token')
+  })
+
+  it('ig inbound --identity: authenticates as specified identity', async () => {
+    lastInboundAuth = null
+    await ig('inbound', 'some.ref', '--identity', 'alt')
+    assert.ok(lastInboundAuth, 'inbound request should include Authorization header')
+    assert.match(lastInboundAuth, /^Bearer /, 'should use Bearer token')
   })
 
   it('ig --help: shows InstructionGraph description and base commands', async () => {
@@ -387,6 +423,24 @@ describe('CLI', () => {
     const { stdout } = await ig('identity')
     assert.match(stdout, /Identity: default/)
     assert.match(stdout, /Pubkey:/)
+  })
+
+  it('ig identity --identity N: shows the named identity instead of the active one', async () => {
+    const { stdout: defaultStdout } = await ig('identity')
+    const { stdout: altStdout } = await ig('identity', '--identity', 'alt')
+    assert.match(altStdout, /Identity: alt/)
+    assert.match(altStdout, /Pubkey:/)
+    const defaultPubkey = defaultStdout.match(/Pubkey: (\S+)/)?.[1]
+    const altPubkey = altStdout.match(/Pubkey: (\S+)/)?.[1]
+    assert.ok(defaultPubkey && altPubkey, 'both should report a pubkey')
+    assert.notEqual(defaultPubkey, altPubkey, 'alt identity should have a different pubkey')
+  })
+
+  it('ig identity --identity N: errors clearly when the identity does not exist', async () => {
+    await assert.rejects(
+      ig('identity', '--identity', 'no-such-identity'),
+      err => err.code === 1 && /No identity 'no-such-identity' found/.test(err.stderr)
+    )
   })
 
   describe('ig identity generate', () => {
