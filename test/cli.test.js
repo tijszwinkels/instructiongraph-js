@@ -312,6 +312,43 @@ describe('CLI', () => {
     )
   })
 
+  it('ig create --update: fails when spec has no id (would silently create new otherwise)', async () => {
+    const specPath = join(projectDir, 'upd-no-id-spec.json')
+    await writeFile(specPath, JSON.stringify({ type: 'NOTE', in: ['dataverse001'], content: { text: 'noid' } }))
+
+    await assert.rejects(
+      ig('create', specPath, '--update'),
+      /--update requires.*id/i
+    )
+  })
+
+  it('ig create --update: accepts wrapped envelope (round-trip from ig get)', async () => {
+    const specPath = join(projectDir, 'wrap-spec.json')
+    const fixedId = '66666666-6666-6666-6666-666666666666'
+
+    // Create original via flat spec
+    await writeFile(specPath, JSON.stringify({ type: 'NOTE', id: fixedId, in: ['dataverse001'], content: { text: 'orig' } }))
+    const { stdout: out1 } = await ig('create', specPath)
+    const ref = out1.trim()
+
+    // Fetch and re-submit the wrapped envelope (as the user would after `ig get | edit`),
+    // editing only the content. The CLI should unwrap, recognise the id, and update.
+    const { stdout: fetched } = await ig('get', ref)
+    const envelope = JSON.parse(fetched)
+    envelope.item.content.text = 'wrapped-update'
+    delete envelope.signature  // user invalidated it by editing
+    await writeFile(specPath, JSON.stringify(envelope))
+
+    const { stdout: out2, stderr } = await ig('create', specPath, '--update')
+    assert.equal(out2.trim(), ref, 'ref should be preserved')
+    assert.match(stderr, /unwrapping/i, 'should announce unwrap')
+
+    const updated = stored.get(ref)
+    assert.equal(updated.item.content.text, 'wrapped-update')
+    assert.equal(updated.item.revision, 1)
+    assert.ok(await verify(updated.item.pubkey, updated.signature, updated.item), 'valid signature after re-sign')
+  })
+
   it('ig create: creates normally without --update even with explicit id', async () => {
     const specPath = join(projectDir, 'new-with-id-spec.json')
     const fixedId = '55555555-5555-5555-5555-555555555555'

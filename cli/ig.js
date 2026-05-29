@@ -1097,7 +1097,21 @@ async function main() {
 
       if (forcePush && noPush) die('Cannot use both --push and --no-push')
 
-      const spec = JSON.parse(readFileSync(resolve(file), 'utf-8'))
+      let spec = JSON.parse(readFileSync(resolve(file), 'utf-8'))
+
+      // Accept a wrapped envelope ({ is: 'instructionGraph001', [signature], item }) — e.g. the output
+      // of `ig get` — by unwrapping it to the flat fields buildItem expects. pubkey/ref/signature are
+      // re-derived from the signing identity, so strip them to avoid clobbering the signer's state.
+      if (spec && spec.is === 'instructionGraph001' && spec.item && typeof spec.item === 'object') {
+        console.error('Detected wrapped envelope — unwrapping to flat spec fields.')
+        const { pubkey: _pk, ref: _ref, signature: _sig, ...inner } = spec.item
+        spec = inner
+      }
+
+      // --update without an id would silently fall through and create a brand-new object — refuse.
+      if (allowUpdate && !spec.id) {
+        die('--update requires the spec to include an "id" field naming the existing object to update.')
+      }
 
       // If spec explicitly targets local realm, ensure makeClient uses a local-capable store
       const effectiveLocalRealm = realm === 'local' || (spec.in && spec.in.includes('local'))
