@@ -82,6 +82,19 @@ export function scaffoldContent(schema) {
 }
 
 /**
+ * Pick the sub-schema describing `content`. TYPE schemas are item-level
+ * (validated against the whole item), so the content schema normally lives at
+ * `properties.content`. Fall back to treating the schema itself as the content
+ * schema for TYPEs that describe content directly.
+ * @param {object} [schema]
+ */
+export function contentSchemaOf(schema) {
+  if (!schema) return undefined
+  if (schema.properties && schema.properties.content) return schema.properties.content
+  return schema
+}
+
+/**
  * Scaffold a full draft object from a fetched TYPE.
  * @param {object} args
  * @param {object} args.typeObj - the fetched TYPE envelope ({ item: { content: { name, schema } } })
@@ -98,7 +111,7 @@ export function buildDraft({ typeObj, typeRef, identityName, realm }) {
     type: typeName,
     name: '<replace: short human-readable label>',
     instruction: '<replace: how an agent should interpret and display this object>',
-    content: scaffoldContent(schema),
+    content: scaffoldContent(contentSchemaOf(schema)),
     relations: {
       type_def: [{ ref: typeRef }],
       root: [{ ref: ROOT_REF, url: `https://dataverse001.net/${ROOT_REF}`, instruction: ROOT_INSTRUCTION }]

@@ -98,6 +98,20 @@ describe('buildDraft', () => {
     assert.deepEqual(draft._draft, { mode: 'new', type_ref: typeRef })
   })
 
+  it('scaffolds content from an item-level schema (properties.content)', () => {
+    const itemLevel = { item: { content: { name: 'RECIPE', schema: {
+      type: 'object',
+      required: ['instruction', 'content'],
+      properties: {
+        instruction: { type: 'string' },
+        content: { type: 'object', required: ['steps'], properties: { steps: { type: 'string', description: 'how to cook' } } }
+      }
+    } } } }
+    const draft = buildDraft({ typeObj: itemLevel, typeRef })
+    assert.equal(draft.content.steps, '<string: how to cook>')
+    assert.ok(!('instruction' in draft.content), 'item-level fields do not leak into content')
+  })
+
   it('a TYPE without a schema still yields a minimal draft (empty content)', () => {
     const noSchema = { item: { content: { name: 'FREEFORM' } } }
     const draft = buildDraft({ typeObj: noSchema, typeRef })
