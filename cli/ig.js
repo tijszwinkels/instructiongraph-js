@@ -16,7 +16,7 @@
  */
 
 import { readFileSync, writeFileSync, existsSync, mkdirSync, readdirSync, unlinkSync } from 'node:fs'
-import { resolve, join, basename, dirname } from 'node:path'
+import { resolve, join, dirname } from 'node:path'
 import { canonicalJSON } from '../src/canonical.js'
 import { verify } from '../src/crypto.js'
 import { isEnvelope } from '../src/object.js'
@@ -64,7 +64,13 @@ function positionals(argv, valueFlags = []) {
   return out
 }
 
+// When a write verb (new/edit/commit/…) is running, shared helpers (die,
+// validateFlags, makeClient) must honour the write-verb error contract:
+// `error:`-prefixed stderr and exit 2 for usage/config errors.
+let writeVerbActive = false
+
 function die(msg) {
+  if (writeVerbActive) { writeErr(msg); process.exit(2) }
   console.error(`Error: ${msg}`)
   process.exit(1)
 }
@@ -978,6 +984,7 @@ function failWrite(msg, code = 1) { writeErr(msg); process.exit(code) }
 
 /** Run a write-verb handler, mapping any unexpected throw to an `error:` line. */
 async function runWrite(fn) {
+  writeVerbActive = true // shared helpers (die/validateFlags/makeClient) now use the write-verb contract
   try { await fn() }
   catch (e) { writeErr(e.message); process.exit(e.exitCode ?? 1) }
 }
@@ -1043,7 +1050,8 @@ async function ensureAuthForPush(ctx, realms) {
   if (readConfig(ctx.configDir, 'auth-token', null)) return
   writeNote('authenticating to push to identity realm…')
   const result = await ctx.client.authenticate()
-  if (!result.ok) failWrite('authentication failed — cannot push to identity realm.', 4)
+  // Nothing is signed or stored yet, so this is not the exit-4 "stored locally" case.
+  if (!result.ok) failWrite("could not authenticate to push to the identity realm. run 'ig server login' first.", 1)
   writeConfig(ctx.configDir, 'auth-token', result.token)
 }
 
@@ -1063,7 +1071,11 @@ async function publishItem(ctx, item, { requirePush = false, noPush = false } = 
   }
 
   const res = await ctx.client.publish(signed)
-  if (!res.ok) failWrite(`could not store object: ${res.error || `status ${res.status}`}`, 1)
+  if (!res.ok) {
+    // A revision clash here means the object moved under us between load and save.
+    failWrite([`could not store object: ${res.error || `status ${res.status}`}`,
+      're-run the command to rebuild the change on the latest revision.'], 1)
+  }
   // Sync store reports the true push outcome via _remoteOk. A hub-only store
   // (no local data dir) has no _remoteOk — a successful put there IS the push.
   // An offline fs store is never pushed.
@@ -1078,12 +1090,17 @@ async function publishItem(ctx, item, { requirePush = false, noPush = false } = 
   return { ref: item.ref, revision, pushed }
 }
 
-/** Print the one-line success result and consume the draft if it lived under drafts/. */
+/**
+ * Print the one-line success result and consume the draft — but only if it is
+ * the tool's own scratch draft (directly under ./drafts, where `ig new`/`ig edit`
+ * put it). Never delete an arbitrary file the user happens to point us at.
+ */
 function reportCommitted(res, draftFile) {
   console.log(`committed ${res.ref} rev ${res.revision} (${res.pushed ? 'pushed' : 'local-only'})`)
   if (draftFile) {
     const p = resolve(draftFile)
-    if (basename(dirname(p)) === 'drafts' && existsSync(p)) {
+    const ownDraftsDir = resolve(process.cwd(), 'drafts')
+    if (dirname(p) === ownDraftsDir && existsSync(p)) {
       try { unlinkSync(p) } catch { /* leave it if we can't remove it */ }
     }
   }
@@ -1109,7 +1126,9 @@ async function cmdNew() {
   }
 
   const draft = buildDraft({ typeObj, typeRef, identityName, realm })
-  const typeName = typeObj.item.content?.name || 'draft'
+  // Sanitize the TYPE name before using it in a filename — it comes from a fetched
+  // object and could contain path separators (e.g. "../../evil").
+  const typeName = String(typeObj.item.content?.name || 'draft').replace(/[^A-Za-z0-9._-]/g, '_').replace(/^\.+/, '') || 'draft'
   const path = allocDraftPath(flag('out'), `${typeName}-${draftTimestamp()}.json`)
   writeFileSync(path, JSON.stringify(draft, null, 2) + '\n')
   console.log(path)
@@ -1180,10 +1199,6 @@ async function cmdCommit({ forceDryRun = false } = {}) {
   // 2. Extract _draft (stripped from the payload — never signed)
   const { draft, payload } = extractDraft(parsed)
 
-  // 4. Envelope checks (unknown / signature-managed top-level fields)
-  const envErrors = envelopeErrors(payload)
-  if (envErrors.length) failWrite(envErrors, 1)
-
   // 3. Resolve identity / realm (flag > _draft > fallback), surfacing fallbacks
   const configDir = findConfigDir()
   const activeIdentity = readConfig(configDir, 'active-identity', 'default')
@@ -1195,6 +1210,15 @@ async function cmdCommit({ forceDryRun = false } = {}) {
   const realm = await resolveRealmAlias(target.realm, configDir, target.identity)
   if (target.realmSource === 'fallback') writeNote(`using default realm: ${realm ?? '(identity realm — private)'}`)
 
+  // 4. Envelope checks (unknown / signature-managed top-level fields)
+  const envErrors = envelopeErrors(payload)
+  if (envErrors.length) failWrite(envErrors, 1)
+
+  // The author relation is signature-managed — never take it from a draft.
+  // (new: rebuilt by client.build; merge: preserved from the original;
+  //  checkout: restored from the original in the patch fn below.)
+  if (payload.relations && 'author' in payload.relations) delete payload.relations.author
+
   const identityName = target.identitySource === 'fallback' ? undefined : target.identity
   const ctx = await makeClient({ identityName, realm })
   if (!ctx.client.signer) failWrite("no identity configured. run 'ig identity generate' first.", 2)
@@ -1203,8 +1227,15 @@ async function cmdCommit({ forceDryRun = false } = {}) {
   // Explicit --realm overrides the object's realm regardless of mode.
   if (target.realmSource === 'flag' && realm) payload.in = [realm]
 
-  // 5. Route by mode
+  // 5. Route by mode. --update (explicit merge target) beats a _draft mode,
+  // but a checkout draft + --update is a contradiction — refuse it.
   const updateRef = flag('update')
+  if (updateRef && draft?.mode === 'checkout') {
+    failWrite([
+      'this draft was checked out with `ig edit` (a full-document update).',
+      'drop --update to commit the checkout, or pass a bare spec (not a checkout draft) with --update to merge.'
+    ], 2)
+  }
   const mode = updateRef ? 'merge' : (draft?.mode === 'checkout' ? 'checkout' : 'new')
 
   let item, wouldMsg
@@ -1227,6 +1258,9 @@ async function cmdCommit({ forceDryRun = false } = {}) {
         for (const k of ['type', 'name', 'instruction', 'content', 'relations', 'in', 'rights']) {
           if (payload[k] !== undefined) next[k] = payload[k]
         }
+        // Never let a checkout drop the realm (would orphan the object) or the author.
+        if (next.in === undefined) next.in = orig.in
+        if (orig.relations?.author) next.relations = { ...(next.relations || {}), author: orig.relations.author }
         return next
       })
     } catch (e) { return failWrite(e.message, 1) }
@@ -1244,6 +1278,12 @@ async function cmdCommit({ forceDryRun = false } = {}) {
     catch (e) { return failWrite(e.message, 1) }
     item = built.item
     wouldMsg = `would update ${updateRef}`
+  }
+
+  // Every object must belong to a realm — a missing/empty `in` would make it
+  // invisible even to its owner and bypass the identity-realm push gate.
+  if (!Array.isArray(item.in) || item.in.length === 0) {
+    failWrite("the object has no realm — keep the 'in' field, or pass --realm.", 1)
   }
 
   // 6. Schema validation · 7. Relation shape checks
@@ -1265,8 +1305,14 @@ async function cmdCommit({ forceDryRun = false } = {}) {
 async function cmdSet() {
   const valueFlags = ['identity']
   validateFlags('set', args.slice(1), { booleanFlags: ['json', 'delete'], valueFlags })
-  const [ref, path, rawValue] = positionals(args.slice(1), valueFlags)
+  const pos = positionals(args.slice(1), valueFlags)
+  const [ref, path, rawValue] = pos
   if (!ref || !path) failWrite('usage: ig set <ref> <path> [<value>] [--json] [--delete] [--identity N]', 2)
+  // Guard against silent truncation of an unquoted multi-word value.
+  if (pos.length > 3) {
+    failWrite([`too many arguments — got ${pos.length - 2} value tokens after the path.`,
+      'quote the value if it contains spaces, e.g. ig set <ref> content.title "Two words".'], 2)
+  }
 
   const isDelete = args.includes('--delete')
   const isJson = args.includes('--json')
@@ -1325,6 +1371,8 @@ async function cmdRelate() {
   } catch (e) { return failWrite(e.message, 1) }
 
   await validateOrFail(ctx, built.item)
+  const relErrors = relationRefErrors(built.item)
+  if (relErrors.length) failWrite(relErrors, 1)
   const res = await publishItem(ctx, built.item, {})
   reportCommitted(res)
 }
@@ -1349,6 +1397,8 @@ async function cmdUnrelate() {
   } catch (e) { return failWrite(e.message, 1) }
 
   await validateOrFail(ctx, built.item)
+  const relErrors = relationRefErrors(built.item)
+  if (relErrors.length) failWrite(relErrors, 1)
   const res = await publishItem(ctx, built.item, {})
   reportCommitted(res)
 }

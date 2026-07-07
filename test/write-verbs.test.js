@@ -444,4 +444,84 @@ describe('write verbs', () => {
       assert.match(e.stderr, /not related/)
     })
   })
+
+  // ─── Hardening (fixes from code review) ──────────────────────────
+
+  describe('hardening', () => {
+    const pubkey = async () => (await ig('identity')).stdout.match(/Pubkey: (\S+)/)[1]
+
+    it('ig new sanitizes a TYPE name so it cannot escape drafts/', async () => {
+      const evilType = join(projectDir, 'evil-type.json')
+      await writeFile(evilType, JSON.stringify({ type: 'TYPE', in: ['dataverse001'], content: { name: '../../pwned' } }))
+      const { stdout } = await ig('create', evilType)
+      const evilRef = stdout.trim().split('\n').pop()
+      const { stdout: p } = await ig('new', evilRef)
+      const rel = p.trim()
+      assert.ok(rel.startsWith('drafts/'), `draft stays under drafts/: ${rel}`)
+      assert.equal(rel.split('/').length, 2, 'no path separators beyond drafts/ — cannot escape the dir')
+      assert.ok(existsSync(join(projectDir, rel)), 'the draft was written inside the project drafts/ dir')
+    })
+
+    it('ig set errors on unquoted multi-word values (exit 2), not silent truncation', async () => {
+      const ref = await createObj({ type: 'POST', content: {} })
+      const e = await igFail('set', ref, 'content.title', 'Two', 'Words')
+      assert.equal(e.code, 2)
+      assert.match(e.stderr, /quote the value/)
+    })
+
+    it('ig commit strips a draft-supplied author relation, keeping the real signer', async () => {
+      const fake = 'ApWJVWXvVKIIMnH6CP6u8HUyU2gLvyYGnwRlgrWAUwcP.d3d1219a-e755-456c-b02b-3d81cd3bd303'
+      const id = '77777777-7777-7777-7777-777777777777'
+      const p = await writeDraft({
+        type: 'POST', id, in: ['dataverse001'], content: { title: 'x' },
+        relations: { author: [{ ref: fake }] }, _draft: { mode: 'new' }
+      })
+      const { stdout } = await ig('commit', p)
+      const ref = stdout.trim().split(' ')[1]
+      const author = stored.get(ref).item.relations.author
+      assert.equal(author[0].ref, `${await pubkey()}.00000000-0000-0000-0000-000000000001`, 'author is the signer identity, not the fake ref')
+    })
+
+    it('ig commit refuses a checkout draft combined with --update (exit 2)', async () => {
+      const ref = await createObj({ type: 'POST', content: { title: 'a' } })
+      const { stdout: e } = await ig('edit', ref)
+      const draftPath = join(projectDir, e.trim())
+      const err = await igFail('commit', draftPath, '--update', ref)
+      assert.equal(err.code, 2)
+      assert.match(err.stderr, /checkout/)
+    })
+
+    it('ig commit keeps the realm when a checkout draft omits "in"', async () => {
+      const ref = await createObj({ type: 'POST', content: { title: 'a' } })
+      const { stdout: e } = await ig('edit', ref)
+      const draftPath = join(projectDir, e.trim())
+      const draft = JSON.parse(await readFile(draftPath, 'utf-8'))
+      delete draft.in
+      draft.content.title = 'b'
+      await writeFile(draftPath, JSON.stringify(draft))
+      await ig('commit', draftPath)
+      assert.deepEqual(stored.get(ref).item.in, ['dataverse001'], 'realm preserved, object not orphaned')
+    })
+
+    it('ig commit does not delete a committed file outside ./drafts', async () => {
+      await mkdir(join(projectDir, 'sub', 'drafts'), { recursive: true })
+      const outside = join(projectDir, 'sub', 'drafts', 'keepme.json')
+      await writeFile(outside, JSON.stringify({ type: 'POST', in: ['dataverse001'], content: { title: 'keep' }, _draft: { mode: 'new' } }))
+      await ig('commit', outside)
+      assert.ok(existsSync(outside), 'a file under a non-cwd drafts/ dir is left in place')
+    })
+
+    it('flag-parse errors on write verbs use error:/exit 2', async () => {
+      const e = await igFail('new', typeRef, '--bogus-flag')
+      assert.equal(e.code, 2)
+      assert.match(e.stderr, /^error:/m)
+    })
+
+    it('a bad --identity on a write verb is error:/exit 2', async () => {
+      const p = await writeDraft({ type: 'POST', in: ['dataverse001'], content: {}, _draft: { mode: 'new' } })
+      const e = await igFail('commit', p, '--identity', 'nonexistent')
+      assert.equal(e.code, 2)
+      assert.match(e.stderr, /^error:/m)
+    })
+  })
 })

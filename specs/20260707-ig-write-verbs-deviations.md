@@ -113,9 +113,57 @@ Fallback/advisory lines (`using active identity: …`, `TYPE … has no schema �
 `authenticating to push …`) are printed to stderr prefixed `note:`, distinct
 from `error:`. stdout still carries only the machine-usable result.
 
-## Known limitation
+## Hardening from code review
 
-`ig set <ref> <path> <value>` where `<value>` begins with `-` is not supported —
-the positional parser treats a leading-dash token as a flag. Rare for the target
-fields (titles, names, tags); use `ig edit` + `ig commit` for such values. Noted
-rather than fixed to keep the arg parser consistent with the rest of the CLI.
+A multi-agent review pass surfaced these; all are fixed and covered by tests in
+`test/write-verbs.test.js` (`describe('hardening')`):
+
+- **`ig new` filename injection.** The default draft filename derives from the
+  fetched TYPE's `content.name`, which is attacker-controllable. It is now
+  sanitized (`[^A-Za-z0-9._-]` → `_`, leading dots stripped) so a name like
+  `../../evil` cannot write outside `drafts/`.
+- **Draft-supplied `author` relation.** `author` is signature-managed, so
+  `ig commit` strips any `relations.author` from the draft: `new` rebuilds it
+  from the signer, `merge` preserves the original, `checkout` restores it from
+  the original in the patch. (Matches `ig relate`/`set`, which already refuse it.)
+- **Checkout dropping `in`.** A checkout draft that deletes `in` no longer
+  produces a realm-less (orphaned, owner-invisible, push-gate-bypassing) object:
+  the checkout patch falls back to the original `in`, and a final guard rejects
+  any item with an empty/missing realm.
+- **`ig commit <checkout-draft> --update`** is a contradiction (checkout =
+  full-replace, `--update` = merge) and is now refused with exit 2, rather than
+  silently switching to merge and dropping the conflict check.
+- **`drafts/` auto-delete** is scoped to the tool's own `./drafts` (resolved
+  against cwd), so committing a user file that merely happens to sit under some
+  other directory named `drafts` never deletes it.
+- **`ig set` multi-word values.** Extra positional tokens after the value (an
+  unquoted multi-word value) are now an exit-2 error telling the user to quote,
+  instead of being silently truncated to the first word.
+- **Write-verb error contract on shared helpers.** While a write verb runs,
+  `die()` (used by `validateFlags` and `makeClient`) emits `error:`-prefixed
+  stderr and exits 2, so bad flags / unknown `--identity` / unconfigured store
+  honour §4 like the rest of the verb. Other (non-write) commands are unchanged.
+- **`ensureAuthForPush` failure** is exit 1 (not the exit-4 "stored locally"
+  code), because nothing is signed or stored when pre-push auth fails.
+
+## Known limitations (deliberately out of scope)
+
+- **Leading-dash values.** `ig set <ref> <path> <value>` where `<value>` begins
+  with `-` is not supported — the positional parser treats a leading-dash token
+  as a flag. Rare for the target fields (titles, names, tags); use `ig edit` +
+  `ig commit` for such values. Left as-is to keep the arg parser consistent with
+  the rest of the CLI.
+- **`set`/`relate`/`unrelate` are last-write-wins.** They load the latest
+  revision, apply the change, and save; they carry no base revision, so two
+  concurrent edits can still clobber (the underlying `store.put` only rejects a
+  *lower* incoming revision, not an equal one — pre-existing store behaviour).
+  Spec §3.5/§3.6 don't ask these verbs for a conflict check; `ig edit` +
+  `ig commit` is the conflict-safe path (exit 3). Not changed here.
+- **Draft path allocation is check-then-act.** `allocDraftPath`/`uniquePath`
+  test with `existsSync` and don't reserve the slot, so two `ig new` invocations
+  in the same second could compute the same path. Acceptable for an interactive
+  CLI; noted rather than adding file-locking.
+- **Auto-auth duplication.** `ensureAuthForPush` overlaps with the inline
+  auto-auth block in the `ig create` handler. Left un-merged to avoid changing
+  the established, separately-tested `create` behaviour; the write verbs use the
+  new helper.
