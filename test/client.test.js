@@ -261,6 +261,56 @@ describe('client', () => {
     })
   })
 
+  describe('buildUpdate() — compute an update without publishing', () => {
+    it('returns the merged item and original, and does NOT store', async () => {
+      const store = createMockStore()
+      const ig = createClient({
+        store,
+        identity: { type: 'credentials', username: 'bu-test', password: 'bu-test-pw' }
+      })
+      await ig.ready
+
+      const ref = await ig.create({ type: 'POST', content: { title: 'Original', meta: { author: 'Alice' } } })
+      const before = await store.get(ref)
+
+      const { item, orig } = await ig.buildUpdate(ref, { content: { meta: { version: 2 } } })
+      // Deep-merge semantics, immutables preserved, revision bumped
+      assert.equal(item.content.title, 'Original')
+      assert.equal(item.content.meta.author, 'Alice')
+      assert.equal(item.content.meta.version, 2)
+      assert.equal(item.id, orig.id)
+      assert.equal(item.revision, 1)
+
+      // Store is untouched — buildUpdate never publishes
+      const after = await store.get(ref)
+      assert.equal(after.item.revision ?? 0, before.item.revision ?? 0)
+      assert.ok(!after.item.content.meta.version, 'store not mutated')
+    })
+
+    it('supports the patch-function form', async () => {
+      const store = createMockStore()
+      const ig = createClient({ store, identity: { type: 'credentials', username: 'bu2', password: 'bu2-pw' } })
+      await ig.ready
+      const ref = await ig.create({ type: 'NOTE', content: { text: 'a' } })
+      const { item } = await ig.buildUpdate(ref, cur => { cur.content.text = 'b'; return cur })
+      assert.equal(item.content.text, 'b')
+    })
+
+    it('rejects updates to objects owned by someone else', async () => {
+      const store = createMockStore({
+        'FAKEPUBKEY.11111111-1111-1111-1111-111111111111': {
+          item: { id: '11111111-1111-1111-1111-111111111111', ref: 'FAKEPUBKEY.11111111-1111-1111-1111-111111111111', pubkey: 'FAKEPUBKEY', type: 'POST', content: {} }
+        }
+      })
+      const ig = createClient({ store, identity: { type: 'credentials', username: 'bu3', password: 'bu3-pw' } })
+      await ig.ready
+      await assert.rejects(
+        () => ig.buildUpdate('FAKEPUBKEY.11111111-1111-1111-1111-111111111111', { content: { x: 1 } }),
+        /your own objects/
+      )
+    })
+  })
+
   describe('createIdentity with PEM persistence', () => {
     it('generates keypair, publishes IDENTITY, saves PEM to disk', async () => {
       const tmpDir = join(tmpdir(), `ig-identity-test-${Date.now()}`)
