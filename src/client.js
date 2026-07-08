@@ -245,9 +245,19 @@ export function createClient(opts = {}) {
       return signed.item.ref
     },
 
-    // ─── Update (fetch + merge + sign + publish) ───
+    // ─── Build an update (fetch + merge, no signing) ───
 
-    async update(ref, patch) {
+    /**
+     * Compute an updated item from the latest stored revision, without signing
+     * or publishing. Deep-merges a partial patch (or applies a patch function),
+     * preserves immutables, and bumps revision — the same semantics as update(),
+     * exposed so callers can validate/inspect/report before committing.
+     *
+     * @param {string} ref
+     * @param {object|Function} patch - partial patch object, or item => item
+     * @returns {Promise<{ item: object, orig: object }>}
+     */
+    async buildUpdate(ref, patch) {
       requireIdentity()
       const current = await store.get(ref)
       if (!current?.item) throw new Error(`Object not found: ${ref}`)
@@ -273,8 +283,15 @@ export function createClient(opts = {}) {
       updated.updated_at = isoNow()
       updated.revision = (orig.revision || 0) + 1
 
-      await client.validateType(updated)
-      const signed = await client.sign(updated)
+      return { item: updated, orig }
+    },
+
+    // ─── Update (buildUpdate + validate + sign + publish) ───
+
+    async update(ref, patch) {
+      const { item } = await client.buildUpdate(ref, patch)
+      await client.validateType(item)
+      const signed = await client.sign(item)
       const result = await client.publish(signed)
       if (!result.ok) throw new Error(`Publish failed: ${result.error || `status ${result.status}`}`)
       return signed.item.ref

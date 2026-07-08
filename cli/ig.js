@@ -16,7 +16,7 @@
  */
 
 import { readFileSync, writeFileSync, existsSync, mkdirSync, readdirSync, unlinkSync } from 'node:fs'
-import { resolve, join } from 'node:path'
+import { resolve, join, dirname } from 'node:path'
 import { canonicalJSON } from '../src/canonical.js'
 import { verify } from '../src/crypto.js'
 import { isEnvelope } from '../src/object.js'
@@ -26,6 +26,9 @@ import { createFsStore } from '../src/store/fs.js'
 import { createSyncStore } from '../src/store/sync.js'
 import { isVisible, loadSharedRealms } from '../src/store/realm-filter.js'
 import { generateKeypair } from '../src/crypto.js'
+import { buildDraft } from '../src/scaffold.js'
+import { parseDraftJSON, extractDraft, envelopeErrors, resolveCommitTarget } from '../src/draft.js'
+import { setAtPath, deleteAtPath, addRelation, removeRelation, relationRefErrors } from '../src/patch-ops.js'
 
 const args = process.argv.slice(2)
 const cmd = args[0]
@@ -61,7 +64,13 @@ function positionals(argv, valueFlags = []) {
   return out
 }
 
+// When a write verb (new/edit/commit/…) is running, shared helpers (die,
+// validateFlags, makeClient) must honour the write-verb error contract:
+// `error:`-prefixed stderr and exit 2 for usage/config errors.
+let writeVerbActive = false
+
 function die(msg) {
+  if (writeVerbActive) { writeErr(msg); process.exit(2) }
   console.error(`Error: ${msg}`)
   process.exit(1)
 }
@@ -113,6 +122,16 @@ Commands:
   ig verify <file.json>            Verify signature
   ig sign <spec.json> [--identity N]  Sign spec, print envelope
   ig create <spec.json> [options]  Sign and publish
+
+Write verbs (agent-ergonomic, message-carrying):
+  ig new <type-ref> [options]      Scaffold a draft spec from a TYPE
+  ig edit <ref> [options]          Check out an object for editing
+  ig commit <draft.json> [options] Validate + sign + publish a draft
+  ig validate <draft.json> [opts]  Dry-run: validate a draft, change nothing
+  ig set <ref> <path> [value]      Patch one field (--json, --delete)
+  ig relate <ref> <rel> <target>   Add a relation (new signed revision)
+  ig unrelate <ref> <rel> <target> Remove a relation
+
   ig identity                      Show current identity
   ig identity generate [--name N]  Generate a new identity
                        [--project]  Use ./.instructionGraph instead of ~/
@@ -142,10 +161,18 @@ function commandUsage(command) {
     inbound: `Usage: ig inbound <ref> [--relation R] [--type T] [--from PK] [--limit N] [--cursor C] [--identity N] [--counts] [--jsonl] [--raw] [--local] [--remote]\n\nList objects that point to the target ref.\n\nFlags:\n  --relation R  Filter by relation name\n  --type T      Filter by source object type\n  --from PK     Filter by source object pubkey\n  --limit N     Max results (default: 20)\n  --cursor C    Pagination cursor from previous result\n  --identity N  Authenticate as identity N to access private objects\n  --counts      Include inbound relation counts\n  --jsonl       Output one JSON envelope per line (JSONL)\n  --raw         Skip realm filtering (show objects from any realm)\n  --local       Search local store only (skip hub)\n  --remote      Search hub only (skip local)`,
     verify: `Usage: ig verify <file.json>\n\nVerify an instructionGraph001 envelope on disk.`,
     sign: `Usage: ig sign <spec.json> [--identity N]\n\nBuild and sign a spec, then print the canonical envelope JSON.\n\nFlags:\n  --identity N  Sign with identity N instead of active identity`,
-    create: `Usage: ig create <spec.json> [--update] [--identity N] [--realm R] [--push] [--no-push]\n\nBuild, sign, and publish a spec to the configured store.\n\nSpec format (JSON):\n  All fields are optional. Auto-filled: id, pubkey, ref, in, created_at,\n  relations.author. Recommended:\n    type         Object type (e.g. POST, NOTE, COMMENT)\n    name         Short human-readable label\n    instruction  How agents should interpret/display this object\n    content      Free-form payload (e.g. { "title": "...", "body": "..." })\n  Other fields:\n    id           UUID (auto-generated if omitted)\n    in           Realm array (default: your active realm)\n    relations    Named arrays of { ref } links to other objects\n    rights       { license, ai_training_allowed }\n\n  The instruction field is key — it makes objects self-describing so any\n  agent (human or LLM) can understand them without external docs.\n\n  If using a type, add a type_def relation so the schema is validated:\n    "relations": { "type_def": [{ "ref": "<pubkey>.<type-uuid>" }] }\n\n  Structural objects should include a root relation for discoverability:\n    "relations": { "root": [{ "ref": "AxyU5_...00000000-...",\n      "url": "https://dataverse001.net/AxyU5_...00000000-..." }] }\n\nExample:\n  {\n    "type": "POST",\n    "name": "Hello",\n    "instruction": "A post. Display title and body.",\n    "content": { "title": "Hello!", "body": "First post!" }\n  }\n\nFlags:\n  --update      Allow updating existing objects (auto-increments revision,\n                sets updated_at). Without this, fails if object exists.\n  --identity N  Sign with identity N instead of active identity\n  --realm R     Override default realm (e.g. dataverse001, identity)\n  --push        Push to server (auto-login if needed for identity realm)\n  --no-push     Store locally only, skip server push`,
+    create: `Usage: ig create <spec.json> [--update] [--identity N] [--realm R] [--push] [--no-push]\n\nBuild, sign, and publish a spec to the configured store.\n\nSpec format (JSON):\n  All fields are optional. Auto-filled: id, pubkey, ref, in, created_at,\n  relations.author. Recommended:\n    type         Object type (e.g. POST, NOTE, COMMENT)\n    name         Short human-readable label\n    instruction  How agents should interpret/display this object\n    content      Free-form payload (e.g. { "title": "...", "body": "..." })\n  Other fields:\n    id           UUID (auto-generated if omitted)\n    in           Realm array (default: your active realm)\n    relations    Named arrays of { ref } links to other objects\n    rights       { license, ai_training_allowed }\n\n  The instruction field is key — it makes objects self-describing so any\n  agent (human or LLM) can understand them without external docs.\n\n  If using a type, add a type_def relation so the schema is validated:\n    "relations": { "type_def": [{ "ref": "<pubkey>.<type-uuid>" }] }\n\n  Structural objects should include a root relation for discoverability:\n    "relations": { "root": [{ "ref": "AxyU5_...00000000-...",\n      "url": "https://dataverse001.net/AxyU5_...00000000-..." }] }\n\nExample:\n  {\n    "type": "POST",\n    "name": "Hello",\n    "instruction": "A post. Display title and body.",\n    "content": { "title": "Hello!", "body": "First post!" }\n  }\n\nFlags:\n  --update      Allow updating existing objects (auto-increments revision,\n                sets updated_at). Without this, fails if object exists.\n  --identity N  Sign with identity N instead of active identity\n  --realm R     Override default realm (e.g. dataverse001, identity)\n  --push        Push to server (auto-login if needed for identity realm)\n  --no-push     Store locally only, skip server push\n\nFor a merge-not-replace update, field-level patches, relation edits, dry-run\nvalidation, or a conflict-safe checkout, see the write verbs:\n  ig new / ig edit / ig commit / ig validate / ig set / ig relate / ig unrelate`,
+
+    new: `Usage: ig new <type-ref> [--identity N] [--realm R] [--out FILE]\n\nScaffold a draft spec from a TYPE definition. No graph mutation.\n\nFetches the TYPE, reads its content.schema, and writes a draft with every\nrequired property stubbed (typed placeholders), type_def + root relations, and\na _draft metadata block. Edit the draft, then 'ig commit' it.\n\nFlags:\n  --identity N  Recorded in _draft (used later by ig commit)\n  --realm R     Recorded in _draft (used later by ig commit)\n  --out FILE    Output path (default: ./drafts/<type>-<timestamp>.json)\n\nOutput: the draft file path (stdout).`,
+    edit: `Usage: ig edit <ref> [--identity N] [--out FILE]\n\nCheck out the latest revision of your object for editing. No graph mutation.\n\nWrites the object's editable fields plus a _draft checkout block recording the\nbase revision, so 'ig commit' can detect a conflicting concurrent update.\nRefuses objects you do not own.\n\nFlags:\n  --identity N  Authenticate as identity N to read a private object\n  --out FILE    Output path (default: ./drafts/<ref>.json)\n\nOutput: the draft file path (stdout).`,
+    commit: `Usage: ig commit <draft.json> [--update <ref>] [--identity N] [--realm R] [--push|--no-push] [--dry-run]\n\nThe single door into the graph for drafts: parse -> resolve identity/realm ->\nenvelope checks -> route by mode -> schema validation -> relation checks ->\nsign -> store -> push.\n\nModes:\n  new         (default, or _draft.mode=new) create a new object\n  checkout    (_draft.mode=checkout) full-document update, with conflict check\n  --update R  deep-MERGE the draft onto R (omitted fields preserved)\n\nFlags:\n  --update R    Merge this bare spec onto object R (fixes the wipe-omitted gotcha)\n  --identity N  Sign with identity N (overrides _draft)\n  --realm R     Target realm (overrides _draft)\n  --push        Require a successful hub push (else exit 4)\n  --no-push     Store locally only\n  --dry-run     Validate only — sign/store/push nothing (exit 0 if valid)\n\nExit codes: 0 ok - 1 validation/parse - 2 usage - 3 conflict - 4 push failed.\nOn success prints: committed <ref> rev <N> (pushed | local-only).`,
+    validate: `Usage: ig validate <draft.json> [--update <ref>] [--identity N] [--realm R]\n\nAlias for 'ig commit --dry-run': run every check, then stop before signing.\nPrints 'valid: would create|update ...' and exits 0, or lists errors (exit 1).`,
+    set: `Usage: ig set <ref> <path> [<value>] [--json] [--delete] [--identity N]\n\nPatch a single field on your object, then re-sign and publish (revision +1).\n\n  <path>   dot-notation, e.g. content.title, content.tags, name, instruction\n  <value>  a string by default; with --json, parsed as JSON\n\nFlags:\n  --json        Parse <value> as JSON (numbers, booleans, arrays, objects, null)\n  --delete      Remove the key at <path> (no value argument)\n  --identity N  Authenticate as identity N\n\nRefuses signature-managed paths and whole-relations edits (use ig relate).\nOn success prints: committed <ref> rev <N> (pushed | local-only).`,
+    relate: `Usage: ig relate <ref> <relname> <target-ref> [--instruction TEXT] [--url URL]\n\nAdd a relation to your object (a new signed revision). Deduped by target ref:\nif already related, pass --instruction/--url to update it, else it errors.\nThe 'author' relation is managed automatically and cannot be set.\n\nOn success prints: committed <ref> rev <N> (pushed | local-only).`,
+    unrelate: `Usage: ig unrelate <ref> <relname> <target-ref>\n\nRemove a relation from your object (a new signed revision). Errors if the\nrelation entry is not present. An emptied relation key is removed entirely.`,
 
     identity: `Usage: ig identity [generate|activate|list] [options]\n\nShow or manage the active identity.\n\nFlags:\n  --identity N  Show info for identity N instead of the active one\n\nSubcommands:\n  ig identity generate [--name N] [--project] [--activate]\n  ig identity activate <name>\n  ig identity list\n\nEnvironment:\n  INSTRUCTIONGRAPH_DIR  Override config directory location`,
-    server: `Usage: ig server [set <url> | login | logout | remove | push]\n\nShow, configure, or remove the hub server connection.\n\nSubcommands:\n  ig server              Show current server status and auth\n  ig server set <url>    Connect to a hub server for sync\n  ig server login        Log in with your active identity\n  ig server logout       Log out from the hub\n  ig server remove       Disconnect and go offline\n  ig server push [--all]  Push local objects (default: your realms only)\n\nWithout a server, all data stays on local filesystem only.\nWith a server, objects sync between local storage and the hub.\nLogin uses your active identity (see ig identity).`,
+    server: `Usage: ig server [set <url> | login | logout | remove | push]\n\nShow, configure, or remove the hub server connection.\n\nSubcommands:\n  ig server              Show current server status and auth\n  ig server set <url>    Connect to a hub server for sync\n  ig server login        Log in with your active identity\n  ig server logout       Log out from the hub\n  ig server remove       Disconnect and go offline\n  ig server push [--all]  Push local objects (default: your realms only)\n  ig server push --ref R  Push exactly one object by ref\n\nWithout a server, all data stays on local filesystem only.\nWith a server, objects sync between local storage and the hub.\nLogin uses your active identity (see ig identity).`,
     realm: `Usage: ig realm [set <realm|identity|dataverse001|server-public|local>]\n\nShow or set the default realm used for new objects.\n\n  ig realm set identity       Use current identity\'s realm (private)\n  ig realm set dataverse001   Use the public dataverse realm\n  ig realm set server-public  Public on this hub, not propagated globally\n  ig realm set local          Local only \u2014 never synced to any server\n  ig realm set <pubkey>       Use any specific realm`
   }
 
@@ -788,7 +815,32 @@ function setServer() {
   console.log('  ig server push')
 }
 
+/** Push exactly one local object to the hub (the retry surface for commit exit 4). */
+async function serverPushOne(ref) {
+  const configDir = findConfigDir()
+  const hubUrl = readConfig(configDir, 'hub-url', null)
+  if (!hubUrl) die('No server configured. Run \'ig server set <url>\' first.')
+
+  const dataDir = join(configDir, 'data')
+  const local = createFsStore({ dataDir })
+  const obj = await local.get(ref, { skipRealmCheck: true }).catch(() => null)
+  if (!obj?.item) die(`Object not found locally: ${ref}`)
+
+  const hub = createHubStore({ url: hubUrl })
+  const savedToken = readConfig(configDir, 'auth-token', null)
+  if (savedToken) hub.setToken(savedToken)
+
+  let res
+  try { res = await hub.put(obj) }
+  catch (e) { die(`Push failed for ${ref}: ${e.message}`) }
+  if (res && res.ok === false) die(`Push failed for ${ref}: ${res.error || `status ${res.status}`}`)
+  console.log(`Pushed ${ref}.`)
+}
+
 async function serverPush() {
+  const singleRef = flag('ref')
+  if (singleRef) return serverPushOne(singleRef)
+
   const pushAll = args.includes('--all')
   const configDir = findConfigDir()
   const hubUrl = readConfig(configDir, 'hub-url', null)
@@ -912,6 +964,443 @@ async function serverLogout() {
 
   unlinkSync(tokenPath)
   console.log('Logged out.')
+}
+
+// ─── Write verbs (new / edit / commit / validate / set / relate / unrelate) ──
+//
+// Thin CLI wiring over library primitives (client.build/buildUpdate/validateType/
+// sign/publish). Diagnostics go to stderr prefixed `error:` (one per line);
+// stdout carries only machine-usable results. Exit codes: 0 ok · 1 validation/
+// parse/semantic · 2 usage · 3 revision conflict · 4 stored-but-push-failed.
+
+/** Emit `error:`-prefixed diagnostics to stderr, one line each. */
+function writeErr(msg) {
+  for (const line of Array.isArray(msg) ? msg : [msg]) process.stderr.write(`error: ${line}\n`)
+}
+/** Emit a non-error notice to stderr (used for fallbacks / advisories). */
+function writeNote(msg) { process.stderr.write(`note: ${msg}\n`) }
+/** Print diagnostics and exit with the given code. Never returns. */
+function failWrite(msg, code = 1) { writeErr(msg); process.exit(code) }
+
+/** Run a write-verb handler, mapping any unexpected throw to an `error:` line. */
+async function runWrite(fn) {
+  writeVerbActive = true // shared helpers (die/validateFlags/makeClient) now use the write-verb contract
+  try { await fn() }
+  catch (e) { writeErr(e.message); process.exit(e.exitCode ?? 1) }
+}
+
+function draftTimestamp() {
+  const d = new Date()
+  const p = n => String(n).padStart(2, '0')
+  return `${d.getFullYear()}${p(d.getMonth() + 1)}${p(d.getDate())}-${p(d.getHours())}${p(d.getMinutes())}${p(d.getSeconds())}`
+}
+
+/** First unused path: `foo.json` → `foo-2.json` → `foo-3.json` … (never overwrites). */
+function uniquePath(p) {
+  if (!existsSync(p)) return p
+  const dot = p.lastIndexOf('.')
+  const base = dot === -1 ? p : p.slice(0, dot)
+  const ext = dot === -1 ? '' : p.slice(dot)
+  let i = 2
+  while (existsSync(`${base}-${i}${ext}`)) i++
+  return `${base}-${i}${ext}`
+}
+
+/** Choose a draft output path: --out FILE (as given), else ./drafts/<defaultName>. */
+function allocDraftPath(outFlag, defaultName) {
+  if (outFlag) return uniquePath(resolve(outFlag))
+  mkdirSync('drafts', { recursive: true })
+  return uniquePath(join('drafts', defaultName))
+}
+
+/** Look up a locally-known identity name owning `pubkey`, for friendlier errors. */
+async function localIdentityNameForPubkey(configDir, pubkey) {
+  const { importPEM } = await import('../src/identity.js')
+  for (const name of listIdentityNames(configDir)) {
+    const pem = resolveIdentityPemPath(configDir, name)
+    if (!pem) continue
+    try {
+      const kp = await importPEM(readFileSync(pem, 'utf-8'))
+      if (kp.pubkey === pubkey) return name
+    } catch { /* skip unreadable */ }
+  }
+  return null
+}
+
+/** Validate an item against its TYPE schema; on failure list every error, one per line. */
+async function validateOrFail(ctx, item) {
+  try {
+    await ctx.client.validateType(item)
+  } catch (e) {
+    const body = e.message.replace(/^TYPE validation failed: /, '')
+    failWrite(body.split('; '), 1)
+  }
+}
+
+/**
+ * Authenticate before an explicit push when the target realm is an identity realm
+ * and we hold no token yet (mirrors `ig create --push`).
+ */
+async function ensureAuthForPush(ctx, realms) {
+  if (!ctx.isOnline) return
+  const list = realms || []
+  const hasIdentityRealm = list.some(r =>
+    r !== 'dataverse001' && r !== 'local' && r !== 'server-public' && r.length === 44)
+  if (!hasIdentityRealm) return
+  if (readConfig(ctx.configDir, 'auth-token', null)) return
+  writeNote('authenticating to push to identity realm…')
+  const result = await ctx.client.authenticate()
+  // Nothing is signed or stored yet, so this is not the exit-4 "stored locally" case.
+  if (!result.ok) failWrite("could not authenticate to push to the identity realm. run 'ig server login' first.", 1)
+  writeConfig(ctx.configDir, 'auth-token', result.token)
+}
+
+/**
+ * Sign, store, and (unless noPush) push a finished item. Returns { ref, revision,
+ * pushed }. With requirePush, a failed hub push is exit 4 (object is stored locally).
+ */
+async function publishItem(ctx, item, { requirePush = false, noPush = false } = {}) {
+  const signed = await ctx.client.sign(item)
+  const revision = item.revision || 0
+
+  if (noPush) {
+    const local = createFsStore({ dataDir: join(ctx.configDir, 'data') })
+    const res = await local.put(signed)
+    if (!res.ok) failWrite(`could not store object locally: ${res.error}`, 1)
+    return { ref: item.ref, revision, pushed: false }
+  }
+
+  const res = await ctx.client.publish(signed)
+  if (!res.ok) {
+    // A revision clash here means the object moved under us between load and save.
+    failWrite([`could not store object: ${res.error || `status ${res.status}`}`,
+      're-run the command to rebuild the change on the latest revision.'], 1)
+  }
+  // Sync store reports the true push outcome via _remoteOk. A hub-only store
+  // (no local data dir) has no _remoteOk — a successful put there IS the push.
+  // An offline fs store is never pushed.
+  const isSync = typeof ctx.store.setRealmContext === 'function'
+  const pushed = isSync ? res._remoteOk === true : (ctx.isOnline && res.ok === true)
+  if (requirePush && !pushed) {
+    failWrite([
+      `stored ${item.ref} rev ${revision} locally, but the hub push failed: ${res._remoteError || 'unknown error'}`,
+      `retry the push with: ig server push --ref ${item.ref}`
+    ], 4)
+  }
+  return { ref: item.ref, revision, pushed }
+}
+
+/**
+ * Print the one-line success result and consume the draft — but only if it is
+ * the tool's own scratch draft (directly under ./drafts, where `ig new`/`ig edit`
+ * put it). Never delete an arbitrary file the user happens to point us at.
+ */
+function reportCommitted(res, draftFile) {
+  console.log(`committed ${res.ref} rev ${res.revision} (${res.pushed ? 'pushed' : 'local-only'})`)
+  if (draftFile) {
+    const p = resolve(draftFile)
+    const ownDraftsDir = resolve(process.cwd(), 'drafts')
+    if (dirname(p) === ownDraftsDir && existsSync(p)) {
+      try { unlinkSync(p) } catch { /* leave it if we can't remove it */ }
+    }
+  }
+}
+
+// ─── ig new ──────────────────────────────────────────────────────
+
+async function cmdNew() {
+  const valueFlags = ['identity', 'realm', 'out']
+  validateFlags('new', args.slice(1), { valueFlags })
+  const [typeRef] = positionals(args.slice(1), valueFlags)
+  if (!typeRef) failWrite('usage: ig new <type-ref> [--identity N] [--realm R] [--out FILE]', 2)
+
+  const identityName = flag('identity')
+  const realm = flag('realm')
+  const ctx = await makeClient({ identityName, authenticate: !!identityName })
+  const typeObj = await ctx.client.get(typeRef).catch(() => null)
+  if (!typeObj?.item) {
+    failWrite([`TYPE not found: ${typeRef}`, `check the ref, or run 'ig get ${typeRef}' to confirm it exists.`], 1)
+  }
+  if (!typeObj.item.content?.schema) {
+    writeNote(`TYPE ${typeRef} has no schema — scaffolding a minimal draft; fill in content by hand.`)
+  }
+
+  const draft = buildDraft({ typeObj, typeRef, identityName, realm })
+  // Sanitize the TYPE name before using it in a filename — it comes from a fetched
+  // object and could contain path separators (e.g. "../../evil").
+  const typeName = String(typeObj.item.content?.name || 'draft').replace(/[^A-Za-z0-9._-]/g, '_').replace(/^\.+/, '') || 'draft'
+  const path = allocDraftPath(flag('out'), `${typeName}-${draftTimestamp()}.json`)
+  writeFileSync(path, JSON.stringify(draft, null, 2) + '\n')
+  console.log(path)
+}
+
+// ─── ig edit ─────────────────────────────────────────────────────
+
+async function cmdEdit() {
+  const valueFlags = ['identity', 'out']
+  validateFlags('edit', args.slice(1), { valueFlags })
+  const [ref] = positionals(args.slice(1), valueFlags)
+  if (!ref) failWrite('usage: ig edit <ref> [--identity N] [--out FILE]', 2)
+
+  const identityName = flag('identity')
+  const ctx = await makeClient({ identityName, authenticate: !!identityName })
+  if (!ctx.client.pubkey) failWrite("no identity configured. run 'ig identity generate' first.", 2)
+
+  const obj = await ctx.client.get(ref).catch(() => null)
+  if (!obj?.item) failWrite([`not found: ${ref}`, `check the ref, or run 'ig get ${ref}'.`], 1)
+  if (obj.item.pubkey !== ctx.client.pubkey) {
+    const owner = await localIdentityNameForPubkey(ctx.configDir, obj.item.pubkey)
+    failWrite([
+      'can only edit your own objects.',
+      `${ref} is owned by ${owner ? `identity '${owner}'` : `pubkey ${obj.item.pubkey}`}, not you (${ctx.client.pubkey}).`
+    ], 1)
+  }
+
+  // Editable payload = the item minus signature-managed fields.
+  const { pubkey, ref: _ref, signature, ...payload } = obj.item
+  const draft = {
+    ...payload,
+    _draft: {
+      mode: 'checkout',
+      base_ref: ref,
+      base_revision: obj.item.revision || 0,
+      ...(identityName ? { identity: identityName } : {})
+    }
+  }
+  const path = allocDraftPath(flag('out'), `${ref}.json`)
+  writeFileSync(path, JSON.stringify(draft, null, 2) + '\n')
+  console.log(path)
+}
+
+// ─── ig commit / ig validate ─────────────────────────────────────
+
+async function cmdCommit({ forceDryRun = false } = {}) {
+  const name = forceDryRun ? 'validate' : 'commit'
+  const booleanFlags = forceDryRun ? [] : ['push', 'no-push', 'dry-run']
+  const valueFlags = ['identity', 'realm', 'update']
+  validateFlags(name, args.slice(1), { booleanFlags, valueFlags })
+
+  const [file] = positionals(args.slice(1), valueFlags)
+  if (!file) failWrite(`usage: ig ${name} <draft.json> [--update <ref>] [--identity N] [--realm R]${forceDryRun ? '' : ' [--push|--no-push] [--dry-run]'}`, 2)
+
+  const dryRun = forceDryRun || args.includes('--dry-run')
+  const noPush = args.includes('--no-push')
+  const forcePush = args.includes('--push')
+  if (forcePush && noPush) failWrite('cannot use both --push and --no-push', 2)
+
+  // 1. Parse
+  let text
+  try { text = readFileSync(resolve(file), 'utf-8') }
+  catch { return failWrite(`cannot read draft file: ${file}`, 2) }
+  let parsed
+  try { parsed = parseDraftJSON(text) }
+  catch (e) { return failWrite(e.message, 1) }
+
+  // 2. Extract _draft (stripped from the payload — never signed)
+  const { draft, payload } = extractDraft(parsed)
+
+  // 3. Resolve identity / realm (flag > _draft > fallback), surfacing fallbacks
+  const configDir = findConfigDir()
+  const activeIdentity = readConfig(configDir, 'active-identity', 'default')
+  const defaultRealm = readConfig(configDir, 'default-realm', null)
+  const target = resolveCommitTarget({
+    draft, flagIdentity: flag('identity'), flagRealm: flag('realm'), activeIdentity, defaultRealm
+  })
+  if (target.identitySource === 'fallback') writeNote(`using active identity: ${target.identity}`)
+  const realm = await resolveRealmAlias(target.realm, configDir, target.identity)
+  if (target.realmSource === 'fallback') writeNote(`using default realm: ${realm ?? '(identity realm — private)'}`)
+
+  // 4. Envelope checks (unknown / signature-managed top-level fields)
+  const envErrors = envelopeErrors(payload)
+  if (envErrors.length) failWrite(envErrors, 1)
+
+  // The author relation is signature-managed — never take it from a draft.
+  // (new: rebuilt by client.build; merge: preserved from the original;
+  //  checkout: restored from the original in the patch fn below.)
+  if (payload.relations && 'author' in payload.relations) delete payload.relations.author
+
+  const identityName = target.identitySource === 'fallback' ? undefined : target.identity
+  const ctx = await makeClient({ identityName, realm })
+  if (!ctx.client.signer) failWrite("no identity configured. run 'ig identity generate' first.", 2)
+  if (forcePush && !ctx.isOnline) failWrite("cannot push — no server configured. run 'ig server set <url>' first.", 2)
+
+  // Explicit --realm overrides the object's realm regardless of mode.
+  if (target.realmSource === 'flag' && realm) payload.in = [realm]
+
+  // 5. Route by mode. --update (explicit merge target) beats a _draft mode,
+  // but a checkout draft + --update is a contradiction — refuse it.
+  const updateRef = flag('update')
+  if (updateRef && draft?.mode === 'checkout') {
+    failWrite([
+      'this draft was checked out with `ig edit` (a full-document update).',
+      'drop --update to commit the checkout, or pass a bare spec (not a checkout draft) with --update to merge.'
+    ], 2)
+  }
+  const mode = updateRef ? 'merge' : (draft?.mode === 'checkout' ? 'checkout' : 'new')
+
+  let item, wouldMsg
+  if (mode === 'new') {
+    item = ctx.client.build(payload)
+    const existing = await ctx.store.get(item.ref, { skipRealmCheck: true }).catch(() => null)
+    if (existing?.item) {
+      failWrite([`object ${item.ref} already exists (rev ${existing.item.revision || 0}).`,
+        `to change it, run: ig edit ${item.ref}`], 1)
+    }
+    wouldMsg = payload.id ? `would create ${item.ref}` : `would create a new ${payload.type || 'object'} object`
+  } else if (mode === 'checkout') {
+    const baseRef = draft.base_ref
+    if (!baseRef) failWrite('checkout draft is missing _draft.base_ref — re-run: ig edit <ref>', 1)
+    const baseRevision = draft.base_revision || 0
+    let built
+    try {
+      built = await ctx.client.buildUpdate(baseRef, (orig) => {
+        const next = { id: orig.id, pubkey: orig.pubkey, ref: orig.ref, created_at: orig.created_at }
+        for (const k of ['type', 'name', 'instruction', 'content', 'relations', 'in', 'rights']) {
+          if (payload[k] !== undefined) next[k] = payload[k]
+        }
+        // Never let a checkout drop the realm (would orphan the object) or the author.
+        if (next.in === undefined) next.in = orig.in
+        if (orig.relations?.author) next.relations = { ...(next.relations || {}), author: orig.relations.author }
+        return next
+      })
+    } catch (e) { return failWrite(e.message, 1) }
+    if ((built.orig.revision || 0) !== baseRevision) {
+      failWrite([
+        `conflict: ${baseRef} is now at revision ${built.orig.revision || 0}, but your draft is based on ${baseRevision}.`,
+        `someone updated it since you checked it out. re-run: ig edit ${baseRef}`
+      ], 3)
+    }
+    item = built.item
+    wouldMsg = `would update ${baseRef} (rev ${baseRevision} → ${item.revision})`
+  } else { // merge
+    let built
+    try { built = await ctx.client.buildUpdate(updateRef, payload) }
+    catch (e) { return failWrite(e.message, 1) }
+    item = built.item
+    wouldMsg = `would update ${updateRef}`
+  }
+
+  // Every object must belong to a realm — a missing/empty `in` would make it
+  // invisible even to its owner and bypass the identity-realm push gate.
+  if (!Array.isArray(item.in) || item.in.length === 0) {
+    failWrite("the object has no realm — keep the 'in' field, or pass --realm.", 1)
+  }
+
+  // 6. Schema validation · 7. Relation shape checks
+  await validateOrFail(ctx, item)
+  const relErrors = relationRefErrors(item)
+  if (relErrors.length) failWrite(relErrors, 1)
+
+  // 8. Dry-run stops here — nothing signed, stored, or pushed
+  if (dryRun) { console.log(`valid: ${wouldMsg}`); return }
+
+  // 9. Sign → store → push · 10. Report
+  if (forcePush) await ensureAuthForPush(ctx, item.in)
+  const res = await publishItem(ctx, item, { requirePush: forcePush, noPush })
+  reportCommitted(res, file)
+}
+
+// ─── ig set ──────────────────────────────────────────────────────
+
+async function cmdSet() {
+  const valueFlags = ['identity']
+  validateFlags('set', args.slice(1), { booleanFlags: ['json', 'delete'], valueFlags })
+  const pos = positionals(args.slice(1), valueFlags)
+  const [ref, path, rawValue] = pos
+  if (!ref || !path) failWrite('usage: ig set <ref> <path> [<value>] [--json] [--delete] [--identity N]', 2)
+  // Guard against silent truncation of an unquoted multi-word value.
+  if (pos.length > 3) {
+    failWrite([`too many arguments — got ${pos.length - 2} value tokens after the path.`,
+      'quote the value if it contains spaces, e.g. ig set <ref> content.title "Two words".'], 2)
+  }
+
+  const isDelete = args.includes('--delete')
+  const isJson = args.includes('--json')
+  if (isDelete && rawValue !== undefined) failWrite('do not pass a value together with --delete', 2)
+  if (!isDelete && rawValue === undefined) failWrite(`provide a value, or pass --delete to remove '${path}'`, 2)
+
+  let value
+  if (!isDelete) {
+    if (isJson) {
+      try { value = JSON.parse(rawValue) } catch (e) { failWrite(`--json value is not valid JSON: ${e.message}`, 1) }
+    } else {
+      value = rawValue
+    }
+  }
+
+  const identityName = flag('identity')
+  const ctx = await makeClient({ identityName, authenticate: !!identityName })
+  if (!ctx.client.signer) failWrite("no identity configured. run 'ig identity generate' first.", 2)
+
+  let built
+  try {
+    built = await ctx.client.buildUpdate(ref, (item) => {
+      if (isDelete) deleteAtPath(item, path); else setAtPath(item, path, value)
+      return item
+    })
+  } catch (e) { return failWrite(e.message, 1) }
+
+  await validateOrFail(ctx, built.item)
+  const relErrors = relationRefErrors(built.item)
+  if (relErrors.length) failWrite(relErrors, 1)
+  const res = await publishItem(ctx, built.item, {})
+  reportCommitted(res)
+}
+
+// ─── ig relate / ig unrelate ─────────────────────────────────────
+
+async function cmdRelate() {
+  const valueFlags = ['instruction', 'url', 'identity']
+  validateFlags('relate', args.slice(1), { valueFlags })
+  const [ref, relname, target] = positionals(args.slice(1), valueFlags)
+  if (!ref || !relname || !target) {
+    failWrite('usage: ig relate <ref> <relname> <target-ref> [--instruction TEXT] [--url URL]', 2)
+  }
+  const instruction = flag('instruction')
+  const url = flag('url')
+  const identityName = flag('identity')
+  const ctx = await makeClient({ identityName, authenticate: !!identityName })
+  if (!ctx.client.signer) failWrite("no identity configured. run 'ig identity generate' first.", 2)
+
+  let built
+  try {
+    built = await ctx.client.buildUpdate(ref, (item) => {
+      addRelation(item, relname, target, { instruction, url })
+      return item
+    })
+  } catch (e) { return failWrite(e.message, 1) }
+
+  await validateOrFail(ctx, built.item)
+  const relErrors = relationRefErrors(built.item)
+  if (relErrors.length) failWrite(relErrors, 1)
+  const res = await publishItem(ctx, built.item, {})
+  reportCommitted(res)
+}
+
+async function cmdUnrelate() {
+  const valueFlags = ['identity']
+  validateFlags('unrelate', args.slice(1), { valueFlags })
+  const [ref, relname, target] = positionals(args.slice(1), valueFlags)
+  if (!ref || !relname || !target) {
+    failWrite('usage: ig unrelate <ref> <relname> <target-ref>', 2)
+  }
+  const identityName = flag('identity')
+  const ctx = await makeClient({ identityName, authenticate: !!identityName })
+  if (!ctx.client.signer) failWrite("no identity configured. run 'ig identity generate' first.", 2)
+
+  let built
+  try {
+    built = await ctx.client.buildUpdate(ref, (item) => {
+      removeRelation(item, relname, target)
+      return item
+    })
+  } catch (e) { return failWrite(e.message, 1) }
+
+  await validateOrFail(ctx, built.item)
+  const relErrors = relationRefErrors(built.item)
+  if (relErrors.length) failWrite(relErrors, 1)
+  const res = await publishItem(ctx, built.item, {})
+  reportCommitted(res)
 }
 
 // ─── Status ──────────────────────────────────────────────────────
@@ -1184,6 +1673,34 @@ async function main() {
       break
     }
 
+    case 'new':
+      await runWrite(cmdNew)
+      break
+
+    case 'edit':
+      await runWrite(cmdEdit)
+      break
+
+    case 'commit':
+      await runWrite(() => cmdCommit({ forceDryRun: false }))
+      break
+
+    case 'validate':
+      await runWrite(() => cmdCommit({ forceDryRun: true }))
+      break
+
+    case 'set':
+      await runWrite(cmdSet)
+      break
+
+    case 'relate':
+      await runWrite(cmdRelate)
+      break
+
+    case 'unrelate':
+      await runWrite(cmdUnrelate)
+      break
+
     case 'auth':  // hidden alias for 'ig server login'
       validateFlags('server login', args.slice(1))
       await serverLogin()
@@ -1247,7 +1764,7 @@ async function main() {
         validateFlags('server remove', args.slice(2))
         removeServer()
       } else if (subcmd === 'push') {
-        validateFlags('server push', args.slice(2), { booleanFlags: ['all'] })
+        validateFlags('server push', args.slice(2), { booleanFlags: ['all'], valueFlags: ['ref'] })
         await serverPush()
       } else {
         die('Usage: ig server [set <url> | login | logout | remove | push]')

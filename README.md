@@ -84,7 +84,7 @@ ig search [--type T] [--by PK]  # Search objects
 ig inbound <ref> [--relation R]  # Inbound relations
 ig verify <file.json>            # Verify signature
 ig sign <spec.json>              # Sign spec, print envelope
-ig create <spec.json>            # Sign and publish
+ig create <spec.json>            # Sign and publish (full spec)
 ig auth                          # Hub authentication
 ig identity                      # Show current identity
 ig identity generate [--name N]  # Generate new identity
@@ -94,11 +94,39 @@ ig server                        # Show server status
 ig server set <url>              # Connect to hub
 ig server remove                 # Go offline
 ig server push                   # Push all local objects
+ig server push --ref <ref>       # Push one object
 ig realm                         # Show current realm
 ig realm set dataverse001        # Public realm
 ig realm set identity            # Private realm
 ig realm set <realm>             # Custom realm
 ```
+
+### Write verbs
+
+An agent-ergonomic write path with forced, synchronous, message-carrying
+feedback — you don't re-emit a whole document to change one field, and every
+error tells you what to do next. See the [tutorial](./TUTORIAL.md#9-editing-without-re-emitting-the-write-verbs).
+
+```bash
+ig new <type-ref>                # Scaffold a draft spec from a TYPE's schema
+ig edit <ref>                    # Check out an object for editing (conflict-safe)
+ig commit <draft.json>           # Validate + sign + publish a draft
+ig commit <spec.json> --update <ref>  # Deep-MERGE onto <ref> (omitted fields kept)
+ig validate <draft.json>         # Dry-run: run every check, change nothing
+ig set <ref> <path> [value]      # Patch one field (--json, --delete)
+ig relate <ref> <rel> <target>   # Add a relation (new signed revision)
+ig unrelate <ref> <rel> <target> # Remove a relation
+```
+
+Exit codes: `0` ok · `1` validation/parse/semantic · `2` usage · `3` revision
+conflict · `4` stored-locally-but-push-failed. Diagnostics go to stderr
+(prefixed `error:`); stdout carries only the result line.
+
+> **`ig create --update` vs `ig commit --update`.** `create --update` **replaces**
+> the object from a full spec (omitted top-level fields are wiped — preserving only
+> `id`/`created_at`). `commit --update` **deep-merges** a partial spec onto the
+> latest revision, so omitted fields are kept. Reach for `ig set` / `ig commit
+> --update` when you only want to change part of an object.
 
 ## Architecture
 
@@ -110,7 +138,10 @@ src/
   object.js         # buildItem, tombstone, parseRef, makeRef, isEnvelope
   identity.js       # deriveKeypair (PBKDF2), importPEM, createSigner
   validation.js     # JSON Schema validation for TYPE objects
-  client.js         # createClient — high-level API
+  scaffold.js       # schema → draft-spec scaffolding (ig new)
+  patch-ops.js      # field/relation mutations (ig set/relate/unrelate)
+  draft.js          # draft parsing + envelope checks (ig commit/validate)
+  client.js         # createClient — high-level API (incl. buildUpdate)
   store/
     hub.js          # createHubStore — HTTP hub backend
     fs.js           # createFsStore — filesystem (Node only)
