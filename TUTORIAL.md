@@ -225,7 +225,78 @@ Now anyone can find your reply by querying inbound relations on the original pos
 ig inbound AxyU5_...f47ac10b-... --relation replies_to
 ```
 
-## 9. Verify a signed object
+## 9. Editing without re-emitting: the write verbs
+
+So far you've written objects by handing `ig create` a whole spec. To *change* an
+object that way you'd re-emit the entire document — and the update path
+**replaces** it, silently wiping any top-level field you forgot to include. The
+write verbs fix that: they carry synchronous, specific feedback (every error
+tells you what to do next), and they let you change one field without re-typing
+the rest.
+
+**Scaffold a draft from a TYPE.** `ig new` reads the TYPE's schema and writes a
+draft with the required fields stubbed, so you don't hand-type the envelope:
+
+```bash
+ig new <type-ref>
+# drafts/NOTE-20260707-120000.json
+```
+
+Edit the placeholders in that file, then commit it:
+
+```bash
+ig commit drafts/NOTE-20260707-120000.json
+# committed AxyU5_...a1b2c3d4-... rev 0 (pushed)
+```
+
+`ig commit` validates against the TYPE schema, checks the envelope for typos,
+signs, stores, and pushes — failing fast with a specific message if anything is
+off. Want to check *without* writing anything? `ig validate <draft>` (an alias
+for `ig commit --dry-run`) runs every check and changes nothing.
+
+**Change one field.** No draft needed:
+
+```bash
+ig set <ref> content.title "A better title"      # string value
+ig set <ref> content.pinned true --json          # typed value (number/bool/array/object)
+ig set <ref> content.draft --delete              # remove a key
+# committed <ref> rev 1 (pushed)
+```
+
+**Add or remove a relation** (each is a new signed revision):
+
+```bash
+ig relate <ref> replies_to <other-ref> --instruction "in reply to"
+ig unrelate <ref> replies_to <other-ref>
+```
+
+**Merge, don't replace.** To update part of an existing object from a partial
+spec — keeping the fields you omit — use `ig commit --update`:
+
+```bash
+echo '{ "content": { "title": "v2" } }' > patch.json
+ig commit patch.json --update <ref>   # name, other content fields, etc. are preserved
+```
+
+(Contrast `ig create --update`, which replaces the whole document.)
+
+**Concurrency-safe editing.** For a bigger edit, check the object out first:
+
+```bash
+ig edit <ref>            # writes drafts/<ref>.json, recording the base revision
+# ...edit the draft...
+ig commit drafts/<ref>.json
+```
+
+If someone else updated the object while you were editing, `ig commit` refuses
+with a revision conflict (exit code 3) instead of clobbering their change — just
+`ig edit` again to pick up the latest.
+
+Exit codes across all write verbs: `0` success, `1` validation/parse error,
+`2` usage error, `3` revision conflict, `4` stored locally but the hub push
+failed (retry with `ig server push --ref <ref>`).
+
+## 10. Verify a signed object
 
 Got an InstructionGraph JSON file from somewhere? Verify its signature:
 
@@ -239,7 +310,7 @@ Verified OK
 
 This checks the ECDSA signature against the pubkey embedded in the object — no network needed.
 
-## 10. Going back offline
+## 11. Going back offline
 
 Don't need the server anymore? Disconnect:
 
