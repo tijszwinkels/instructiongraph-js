@@ -124,6 +124,32 @@ test('putRef CAS: expectedOldOid mismatch is rejected, correct value succeeds', 
   assert.equal((await repo.getRef('refs/heads/main')).targetOid, b)
 })
 
+test('non-owner writes are rejected; reads still work (single-owner push)', async () => {
+  const dataDir = mkdtempSync(join(tmpdir(), 'ig-store-own-'))
+  const store = createFsStore({ dataDir, filter: null })
+  const a = await throwawayIdentity()
+  const b = await throwawayIdentity()
+  const clientA = createClient({ store, identity: a.identity }); await clientA.ready
+  const clientB = createClient({ store, identity: b.identity }); await clientB.ready
+
+  const repoRef = await initRepo({ client: clientA, id: crypto.randomUUID(), name: 'owned', in: ['server-public'] })
+  const repoA = await openRepo({ client: clientA, repoRef })
+  const oid = await repoA.putObject('blob', Buffer.from('hi\n'))
+  await repoA.putRef('refs/heads/main', { targetOid: oid })
+
+  // B opens the same repo (owned by A). Reads work...
+  const repoB = await openRepo({ client: clientB, repoRef })
+  assert.ok(await repoB.getObject(oid), 'non-owner can read a public repo object')
+  assert.equal((await repoB.getRef('refs/heads/main')).targetOid, oid)
+
+  // ...but writes are refused (would sign into B's namespace, unreadable here)
+  await assert.rejects(() => repoB.putObject('blob', Buffer.from('x\n')), /only the owner can write/i)
+  await assert.rejects(() => repoB.putRef('refs/heads/x', { targetOid: oid }), /only the owner can write/i)
+  await assert.rejects(() => repoB.deleteRef('refs/heads/main'), /only the owner can write/i)
+
+  rmSync(dataDir, { recursive: true, force: true })
+})
+
 test('deleteRef tombstones the ref so it no longer lists', async () => {
   const { client } = await setup()
   const repoRef = await initRepo({ client, id: crypto.randomUUID(), name: 'del', in: ['server-public'] })

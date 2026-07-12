@@ -61,6 +61,21 @@ export async function openRepo({ client, repoRef }) {
   const format = repo.content?.object_format || 'sha1'
   const realms = repo.in
 
+  // Child addresses are computed in the OWNER's namespace, but client.create
+  // signs and addresses objects under the ACTIVE identity. They only coincide
+  // when the active identity IS the owner — which the single-owner-push model
+  // requires anyway. Guard every write so a non-owner can never sign objects
+  // into their own namespace while the repo addresses them in the owner's
+  // (which would "succeed" yet be unreadable). Contributors fork instead.
+  function requireOwner(op) {
+    if (client.pubkey !== owner) {
+      throw new Error(
+        `cannot ${op}: repository ${repoRef} is owned by ${owner}, but the active identity is ` +
+        `${client.pubkey || '(none)'} — only the owner can write (fork to contribute)`
+      )
+    }
+  }
+
   /** Assemble graph-sugar relations for a git object from its parsed mirror. */
   async function objectRelations(otype, content) {
     const relations = {
@@ -118,6 +133,7 @@ export async function openRepo({ client, repoRef }) {
 
     /** Write an immutable git object; idempotent. Returns its oid. */
     async putObject(otype, payload) {
+      requireOwner('write object')
       const content = await payloadToContent(otype, payload, format)
       const oid = content.oid
       const id = await objId(repoId, oid)
@@ -141,8 +157,15 @@ export async function openRepo({ client, repoRef }) {
      * Create or update a ref. Compare-and-swap: if expectedOldOid is provided
      * (may be null for "must not exist / must currently be unset"), the current
      * target_oid must equal it or the update is rejected.
+     *
+     * The read-compare-write is not atomic at the data layer; under genuinely
+     * concurrent writers the last write wins (revision monotonicity is still
+     * enforced by the store). This is acceptable for the single-owner, local-
+     * first v1 — the GIT_REF type states FF/no-clobber is a writer-side concern,
+     * not a data-layer guarantee. Multi-writer atomicity is future work.
      */
     async putRef(refname, { targetOid, symrefTarget, peeledOid } = {}, { expectedOldOid } = {}) {
+      requireOwner('update ref')
       const id = await refId(repoId, refname)
       const addr = makeRef(owner, id)
       const e = await client.get(addr)
@@ -170,6 +193,7 @@ export async function openRepo({ client, repoRef }) {
 
     /** Delete a ref (tombstone). No-op if it does not exist. */
     async deleteRef(refname) {
+      requireOwner('delete ref')
       const addr = makeRef(owner, await refId(repoId, refname))
       const e = await client.get(addr)
       if (!e?.item || e.item.type === 'DELETED') return
