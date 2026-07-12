@@ -11,7 +11,8 @@
   },
   "main": "./src/index.js",
   "bin": {
-    "ig": "./cli/ig.js"
+    "ig": "./cli/ig.js",
+    "git-remote-ig": "./cli/git-remote-ig.js"
   },
   "scripts": {
     "test": "node --test test/*.test.js"
