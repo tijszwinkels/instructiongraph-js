@@ -54,8 +54,10 @@ export async function initRepo({ client, id, name, format = 'sha1', in: realms, 
  * @param {string} o.repoRef - "<owner>.<uuid>"
  */
 export async function openRepo({ client, repoRef }) {
+  // Returns null only for a genuine not-found; a store/network/auth failure
+  // propagates as an exception (callers must not treat those as "empty repo").
   const env = await client.get(repoRef)
-  if (!env?.item) throw new Error(`Repository not found: ${repoRef}`)
+  if (!env?.item) return null
   const repo = env.item
   const { pubkey: owner, id: repoId } = parseRef(repoRef)
   const format = repo.content?.object_format || 'sha1'

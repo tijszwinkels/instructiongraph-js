@@ -21,7 +21,9 @@ function subtleAlg(format) {
 
 /** Number of hex chars in an oid for a given format. */
 export function oidHexLength(format) {
-  return format === 'sha256' ? 64 : 40
+  if (format === 'sha256') return 64
+  if (format === 'sha1') return 40
+  throw new Error(`Unsupported object_format: ${format}`)
 }
 
 const enc = new TextEncoder()

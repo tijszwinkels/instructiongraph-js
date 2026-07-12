@@ -22,7 +22,7 @@ import { basename } from 'node:path'
 import { openRuntime, findConfigDir, resolveIdentityConfig, readConfig } from './runtime.js'
 import { openRepo, initRepo } from '../src/git/repo.js'
 import { parseRef } from '../src/object.js'
-import { resolveGitDir } from '../src/git/gitio.js'
+import { resolveGitDir, objectFormat } from '../src/git/gitio.js'
 import { fetchToLocal, pushToRemote } from '../src/git/transfer.js'
 
 // argv: [node, script, <arg1>, <arg2>]. For `ig::<ref>` git passes the address
@@ -55,23 +55,41 @@ let _repo = null
 async function getRepo({ createIfMissing = false } = {}) {
   if (_repo) return _repo
   const { client } = await runtime()
-  try {
-    _repo = await openRepo({ client, repoRef })
-    return _repo
-  } catch (e) {
-    if (!createIfMissing) return null
-    const { pubkey: owner, id } = parseRef(repoRef)
-    if (owner !== client.pubkey) {
-      throw new Error(`cannot create a repository in another identity's namespace (${owner}); active identity is ${client.pubkey}`)
-    }
-    // New repositories default to the caller's configured default realm, else
-    // the private identity realm. Override with IG_GIT_REALM.
-    const configDir = findConfigDir()
-    const realm = process.env.IG_GIT_REALM || readConfig(configDir, 'default-realm', owner)
-    log(`creating repository ${repoRef} in realm ${realm}`)
-    await initRepo({ client, id, name: basename(process.cwd()) || 'repo', format: 'sha1', in: [realm], defaultBranch: 'refs/heads/main' })
-    _repo = await openRepo({ client, repoRef })
-    return _repo
+  // openRepo returns null only for a genuine not-found; real store/auth/network
+  // errors propagate (so we never mistake them for an empty repository).
+  const existing = await openRepo({ client, repoRef })
+  if (existing) { _repo = existing; return _repo }
+  if (!createIfMissing) return null
+
+  const { pubkey: owner, id } = parseRef(repoRef)
+  if (owner !== client.pubkey) {
+    throw new Error(`cannot create a repository in another identity's namespace (${owner}); active identity is ${client.pubkey}`)
+  }
+  // v1 hosts sha1 repositories only. sha256 is codec-ready but needs remote-
+  // helper object-format negotiation (future work), so refuse it clearly rather
+  // than silently mis-hashing.
+  const localFormat = objectFormat(resolveGitDir())
+  if (localFormat !== 'sha1') {
+    throw new Error(`git-remote-ig v1 supports sha1 repositories only; this repository uses ${localFormat}`)
+  }
+  // New repositories default to the caller's configured default realm, else
+  // the private identity realm. Override with IG_GIT_REALM.
+  const configDir = findConfigDir()
+  const realm = process.env.IG_GIT_REALM || readConfig(configDir, 'default-realm', owner)
+  log(`creating repository ${repoRef} in realm ${realm}`)
+  await initRepo({ client, id, name: basename(process.cwd()) || 'repo', format: 'sha1', in: [realm], defaultBranch: 'refs/heads/main' })
+  _repo = await openRepo({ client, repoRef })
+  return _repo
+}
+
+/** Guard: the local repo's hash algorithm must match the hosted repository's. */
+function assertFormatMatch(repo) {
+  const localFormat = objectFormat(resolveGitDir())
+  if (localFormat !== repo.format) {
+    throw new Error(
+      `object-format mismatch: local repository is ${localFormat} but ${repoRef} is ${repo.format}. ` +
+      `git-remote-ig v1 supports sha1 only.`
+    )
   }
 }
 
@@ -117,6 +135,7 @@ async function doFetch(firstLine, reader) {
   }
   const repo = await getRepo()
   if (!repo) throw new Error(`repository not found: ${repoRef}`)
+  assertFormatMatch(repo)
   const n = await fetchToLocal({ repo, gitDir: resolveGitDir(), wants })
   log(`fetched ${n} object(s)`)
   out('\n')
@@ -140,6 +159,7 @@ async function doPush(firstLine, reader) {
     line = await reader.next()
   }
   const repo = await getRepo({ createIfMissing: true })
+  assertFormatMatch(repo)
   const results = await pushToRemote({ repo, gitDir: resolveGitDir(), pushes })
   for (const r of results) out(r.ok ? `ok ${r.dst}\n` : `error ${r.dst} ${r.error}\n`)
   out('\n')

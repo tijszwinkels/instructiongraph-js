@@ -254,6 +254,49 @@ Your local objects are still on disk — nothing was deleted.
 
 Everything you synced is still on your filesystem.
 
+## 11. Host a git repository
+
+Installing this package also installs a `git-remote-ig` helper, so you can host
+real git repositories in the graph and clone/push them with plain git.
+
+First, create a repository. This prints its ref:
+
+```bash
+ig git init myproject --realm server-public
+```
+
+```
+AxyU5_5vWmP2tO_klN4UpbZzRsuJEvJTrdwdg_gODxZJ.a4c83bde-6fe7-489f-a1ef-aee6f3cf1760
+Created GIT_REPOSITORY "myproject". Clone or push with:
+  git clone ig::AxyU5_....a4c83bde-...
+  git remote add origin ig::AxyU5_....a4c83bde-...
+```
+
+Now push an existing local git repo into it (use the ref you just got):
+
+```bash
+cd myproject                       # a normal git repo with some commits
+git remote add origin ig::AxyU5_....a4c83bde-...
+git push -u origin main
+git push origin --tags             # if you have tags
+```
+
+Each commit, tree, blob and tag becomes a signed, immutable graph object; each
+branch/tag/HEAD becomes a `GIT_REF`. Inspect one with `ig get`, or list the refs
+with `git ls-remote origin`.
+
+Clone it back somewhere else (any machine where the same store/identity is
+reachable — including fully offline):
+
+```bash
+git clone ig::AxyU5_....a4c83bde-... myproject-clone
+cd myproject-clone && git log --oneline    # history intact, git fsck clean
+```
+
+Only your identity can push to a repository you own; to contribute to someone
+else's, fork it (a new repository with a `forked_from` link) — see the README
+for the v1 scope and limits.
+
 ---
 
 **Next:** See the [README](./README.md) for the library API, store interface, and full CLI reference.

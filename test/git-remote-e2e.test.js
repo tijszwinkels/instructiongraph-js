@@ -14,6 +14,7 @@ import { execFileSync } from 'node:child_process'
 import { rmSync, writeFileSync, mkdtempSync, readFileSync, readlinkSync, statSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
+import { fileURLToPath } from 'node:url'
 
 import { buildFixtureRepo, git, mkTmp } from '../test-support/git-fixture.js'
 import { setupIgStore, setupHelperOnPath, gitEnv } from '../test-support/ig-store.js'
@@ -147,6 +148,24 @@ test('non-fast-forward push is rejected without --force, accepted with it', () =
   rmSync(clone, { recursive: true, force: true })
   rclone(`ig::${repoRef}`, clone)
   assert.equal(rgit(clone, ['rev-parse', 'HEAD']).trim(), forcedHead)
+})
+
+test('documented flow: `ig git init` then push to the pre-created anchor', () => {
+  const igCli = fileURLToPath(new URL('../cli/ig.js', import.meta.url))
+  const ref = execFileSync('node', [igCli, 'git', 'init', 'documented', '--realm', 'server-public'], { env })
+    .toString('utf-8').trim()
+  assert.match(ref, new RegExp(`^${store.pubkey}\\.[0-9a-f-]{36}$`), 'ig git init prints the repo ref')
+
+  const src = buildFixtureRepo()
+  cleanup.push(src.dir)
+  rgit(src.dir, ['remote', 'add', 'origin', `ig::${ref}`])
+  rgit(src.dir, ['push', 'origin', 'main']) // pushes to the existing anchor (no auto-create)
+
+  const clone = mkTmp('ig-e2e-doc-')
+  cleanup.push(clone)
+  rmSync(clone, { recursive: true, force: true })
+  rclone(`ig::${ref}`, clone)
+  assert.equal(rgit(clone, ['rev-parse', 'HEAD']).trim(), rgit(src.dir, ['rev-parse', 'main']).trim())
 })
 
 test('deleting a branch via push removes it from ls-remote', () => {

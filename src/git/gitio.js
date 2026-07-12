@@ -50,10 +50,23 @@ export function writeLooseObject(gitDir, oid, otype, payload) {
 /** Run a git plumbing command against an explicit GIT_DIR. */
 export function runGit(gitDir, args, { input, maxBuffer = 256 * 1024 * 1024 } = {}) {
   return execFileSync('git', args, {
-    env: { ...process.env, GIT_DIR: gitDir },
+    // GIT_NO_REPLACE_OBJECTS: read the TRUE objects, never `git replace`
+    // substitutes — otherwise cat-file would hand back a different payload than
+    // the oid we address it by (silent corruption / spurious oid drift).
+    env: { ...process.env, GIT_DIR: gitDir, GIT_NO_REPLACE_OBJECTS: '1' },
     input,
     maxBuffer,
   })
+}
+
+/** The repository's object format ('sha1' | 'sha256'). */
+export function objectFormat(gitDir) {
+  return runGit(gitDir, ['rev-parse', '--show-object-format']).toString('utf-8').trim()
+}
+
+/** True if this is a shallow clone (history is truncated). */
+export function isShallow(gitDir) {
+  return runGit(gitDir, ['rev-parse', '--is-shallow-repository']).toString('utf-8').trim() === 'true'
 }
 
 /**

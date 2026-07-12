@@ -98,7 +98,53 @@ ig realm                         # Show current realm
 ig realm set dataverse001        # Public realm
 ig realm set identity            # Private realm
 ig realm set <realm>             # Custom realm
+ig git init [name] [--realm R]   # Create a git repository (prints its ref)
 ```
+
+## Git hosting (`git clone ig::…`)
+
+Host complete git repositories as signed graph objects and clone/push them with
+a normal git client. Installing the package puts a `git-remote-ig` helper on your
+PATH, so git understands `ig::<repo-ref>` URLs.
+
+```bash
+# 1. Create a repository — prints its ref (ig::<your-pubkey>.<uuid>)
+ig git init myproject --realm server-public
+
+# 2. Push an existing local repo to it
+cd myproject                       # your working git repo
+git remote add origin ig::<ref>
+git push -u origin main            # and: git push origin --tags
+
+# 3. Clone it back anywhere the same store/identity is reachable
+git clone ig::<ref> myproject-clone
+```
+
+**How it works.** Git's immutable objects (commit/tree/blob/tag) become
+never-revised graph objects at deterministic addresses
+`uuid_v5(repo_id, "obj:" + oid)`, signed by you; git's mutable refs (branches,
+tags, `HEAD`) become `GIT_REF` objects updated through the revision mechanism
+(the revision history doubles as a signed reflog). `git ls-remote` is an inbound
+query for the repository's `GIT_REF` children. Objects are read from and signed
+into your local `.instructionGraph` store (and synced to the hub when
+configured), exactly the way the `ig` CLI resolves config and identity — so it
+works offline too.
+
+**v1 scope & limits.**
+
+- Loose objects only (no packfiles) — intended for small/medium repositories.
+- Single-writer: only the repository owner's identity can push; collaborators
+  fork and open a merge request (multi-writer is future work).
+- Blob payloads up to ~5 MB (hard ceiling ≈ 7 MB binary).
+- New repositories default to your configured realm (private identity realm
+  unless you pass `--realm`/`IG_GIT_REALM`); the helper auto-creates the
+  `GIT_REPOSITORY` anchor on first push if you skip `ig git init`.
+- `sha1` only end-to-end (the codec/addressing are sha256-ready, but the
+  remote-helper `object-format` negotiation is future work — pushing a sha256
+  repo is refused with a clear error rather than mis-hashed).
+- Pushing from a shallow clone is refused (it would leave the remote history
+  incomplete). Fetch trusts the local object store's connectivity, exactly as
+  git's own transports do.
 
 ## Architecture
 

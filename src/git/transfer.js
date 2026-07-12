@@ -15,7 +15,7 @@
 import { parseCommit, parseTree, parseTag } from './codec.js'
 import {
   writeLooseObject, catFileBatch, catFile, catFileType,
-  revParse, revListObjects, isAncestor, objectExists,
+  revParse, revListObjects, isAncestor, objectExists, isShallow,
 } from './gitio.js'
 
 // ─── Fetch (clone / fetch) ────────────────────────────────────────
@@ -100,6 +100,13 @@ async function pushOne({ repo, gitDir, push, remoteRefs, localKnownTips }) {
   }
 
   const tipOid = revParse(gitDir, src)
+
+  // A branch must point at a commit (git rejects non-commit objects on
+  // refs/heads/*). Tags may point at any object.
+  if (dst.startsWith('refs/heads/') && catFileType(gitDir, tipOid) !== 'commit') {
+    return { dst, ok: false, error: `cannot push a non-commit object to a branch (${dst})` }
+  }
+
   const { tagOids, peeled: commitOid } = peelTagChain(gitDir, tipOid)
   const peeledOid = tagOids.length ? commitOid : undefined
 
@@ -138,6 +145,11 @@ async function pushOne({ repo, gitDir, push, remoteRefs, localKnownTips }) {
  * @returns {Promise<{dst:string,ok:boolean,error?:string}[]>}
  */
 export async function pushToRemote({ repo, gitDir, pushes }) {
+  // A shallow clone has a truncated history: rev-list stops at the shallow
+  // boundary, so uploading a tip would leave its ancestors missing on the
+  // remote. Refuse object-bearing pushes (deletes are still fine).
+  const shallow = isShallow(gitDir)
+
   const remoteRefs = await repo.listRefs()
   const localKnownTips = remoteRefs
     .map(r => r.targetOid)
@@ -145,6 +157,10 @@ export async function pushToRemote({ repo, gitDir, pushes }) {
 
   const results = []
   for (const push of pushes) {
+    if (shallow && push.src !== '') {
+      results.push({ dst: push.dst, ok: false, error: 'refusing to push from a shallow repository (would leave an incomplete history on the remote)' })
+      continue
+    }
     try {
       results.push(await pushOne({ repo, gitDir, push, remoteRefs, localKnownTips }))
     } catch (e) {

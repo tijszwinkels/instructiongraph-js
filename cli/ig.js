@@ -135,6 +135,8 @@ Commands:
   ig realm set dataverse001             Go public
   ig realm set local                    Local only (never synced)
   ig realm set <realm>                  Set a specific realm
+  ig git init [name] [--realm R]        Create a git repository; prints its ref
+                                          (clone/push with git clone ig::<ref>)
 
 Run 'ig <command> --help' for command-specific help.`)
   process.exit(0)
@@ -151,7 +153,8 @@ function commandUsage(command) {
 
     identity: `Usage: ig identity [generate|activate|list] [options]\n\nShow or manage the active identity.\n\nFlags:\n  --identity N  Show info for identity N instead of the active one\n\nSubcommands:\n  ig identity generate [--name N] [--project] [--activate]\n  ig identity activate <name>\n  ig identity list\n\nEnvironment:\n  INSTRUCTIONGRAPH_DIR  Override config directory location`,
     server: `Usage: ig server [set <url> | login | logout | remove | push]\n\nShow, configure, or remove the hub server connection.\n\nSubcommands:\n  ig server              Show current server status and auth\n  ig server set <url>    Connect to a hub server for sync\n  ig server login        Log in with your active identity\n  ig server logout       Log out from the hub\n  ig server remove       Disconnect and go offline\n  ig server push [--all]  Push local objects (default: your realms only)\n\nWithout a server, all data stays on local filesystem only.\nWith a server, objects sync between local storage and the hub.\nLogin uses your active identity (see ig identity).`,
-    realm: `Usage: ig realm [set <realm|identity|dataverse001|server-public|local>]\n\nShow or set the default realm used for new objects.\n\n  ig realm set identity       Use current identity\'s realm (private)\n  ig realm set dataverse001   Use the public dataverse realm\n  ig realm set server-public  Public on this hub, not propagated globally\n  ig realm set local          Local only \u2014 never synced to any server\n  ig realm set <pubkey>       Use any specific realm`
+    realm: `Usage: ig realm [set <realm|identity|dataverse001|server-public|local>]\n\nShow or set the default realm used for new objects.\n\n  ig realm set identity       Use current identity\'s realm (private)\n  ig realm set dataverse001   Use the public dataverse realm\n  ig realm set server-public  Public on this hub, not propagated globally\n  ig realm set local          Local only \u2014 never synced to any server\n  ig realm set <pubkey>       Use any specific realm`,
+    git: `Usage: ig git init [name] [--realm R] [--identity N]\n\nCreate a native git repository hosted on instructionGraph. Prints the new\nrepository ref; clone or push to it with the git-remote-ig helper:\n\n  git clone ig::<ref>\n  git remote add origin ig::<ref> && git push -u origin main\n\nThe repository and its objects live in your default realm unless --realm is\ngiven. Only your identity can push to it; others fork to contribute.`,
   }
 
   if (!docs[command]) die(`Unknown command: ${command}\nRun 'ig --help' for usage.`)
@@ -1032,6 +1035,37 @@ async function main() {
         await setRealm()
       } else {
         die('Usage: ig realm [set <realm|identity|dataverse001>]')
+      }
+      break
+    }
+
+    case 'git': {
+      const subcmd = args[1]
+      if (subcmd === 'init') {
+        validateFlags('git init', args.slice(2), { valueFlags: ['identity', 'realm', 'name'] })
+        const identityName = flag('identity')
+        const rawRealm = flag('realm')
+        const realm = await resolveRealmAlias(rawRealm, findConfigDir(), identityName)
+        const positional = args[2] && !args[2].startsWith('-') ? args[2] : null
+        const name = flag('name') || positional || 'repo'
+
+        const ctx = await makeClient({ identityName, realm })
+        if (!ctx.client.pubkey) die('No identity configured — run \'ig identity generate\' first.')
+
+        const { initRepo } = await import('../src/git/repo.js')
+        const id = crypto.randomUUID()
+        const ref = await initRepo({
+          client: ctx.client,
+          id,
+          name,
+          format: 'sha1',
+          in: realm ? [realm] : undefined,
+          defaultBranch: 'refs/heads/main',
+        })
+        console.log(ref)
+        console.error(`Created GIT_REPOSITORY "${name}". Clone or push with:\n  git clone ig::${ref}\n  git remote add origin ig::${ref}`)
+      } else {
+        die('Usage: ig git init [name] [--realm R] [--identity N]')
       }
       break
     }
