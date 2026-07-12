@@ -16,6 +16,7 @@ import { buildFixtureRepo } from '../test-support/git-fixture.js'
 import { throwawayIdentity } from '../test-support/throwaway-identity.js'
 import { initRepo, openRepo } from '../src/git/repo.js'
 import { objRef } from '../src/git/addressing.js'
+import { TYPE_REFS } from '../src/git/typerefs.js'
 
 async function setup() {
   const dataDir = mkdtempSync(join(tmpdir(), 'ig-store-'))
@@ -55,6 +56,30 @@ test('every fixture object round-trips through put/getObject byte-identically', 
     assert.deepEqual(Buffer.from(got.payload), o.payload, `payload mismatch for ${o.type} ${o.oid}`)
   }
   rmSync(fx.dir, { recursive: true, force: true })
+})
+
+test('written objects are self-describing: type_def relation + instruction', async () => {
+  const { client } = await setup()
+  const repoRef = await initRepo({ client, id: crypto.randomUUID(), name: 'sd', in: ['server-public'] })
+  const repo = await openRepo({ client, repoRef })
+
+  // the repository anchor
+  const anchor = (await client.get(repoRef)).item
+  assert.ok(anchor.relations.type_def?.[0]?.ref, 'anchor has type_def')
+  assert.match(anchor.instruction || '', /read the GIT_REPOSITORY type/i)
+  assert.match(anchor.instruction || '', new RegExp(`git clone ig::${repoRef.replace(/[.]/g, '\\.')}`))
+
+  // a blob object
+  const oid = await repo.putObject('blob', Buffer.from('hi\n'))
+  const blob = (await client.get(await objRef(repo.owner, repo.repoId, oid))).item
+  assert.equal(blob.relations.type_def[0].ref, TYPE_REFS.GIT_BLOB)
+  assert.match(blob.instruction || '', /GIT_BLOB type via relations\.type_def/)
+
+  // a ref
+  await repo.putRef('refs/heads/main', { targetOid: oid })
+  const refObj = (await client.get((await repo.getRef('refs/heads/main')).addr)).item
+  assert.equal(refObj.relations.type_def[0].ref, TYPE_REFS.GIT_REF)
+  assert.match(refObj.instruction || '', /GIT_REF type via relations\.type_def/)
 })
 
 test('putObject is idempotent (immutable) and stored at the computed address', async () => {

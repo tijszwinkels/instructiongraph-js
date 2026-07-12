@@ -16,7 +16,7 @@ import { payloadToContent, contentToPayload } from './codec.js'
 import { computeOid } from './oid.js'
 import { objId, objRef, refId } from './addressing.js'
 import { encodeRefContent, decodeRefContent } from './ref.js'
-import { TYPE_REFS, OTYPE_TO_TYPE } from './typerefs.js'
+import { TYPE_REFS, OTYPE_TO_TYPE, OTYPE_INSTRUCTION, REF_INSTRUCTION, repoInstruction } from './typerefs.js'
 
 // Hard ceiling on a single object's raw payload. The hub request cap is ~10 MB
 // including base64 (+33%) and the envelope, so ~7 MB of raw bytes is the most
@@ -46,6 +46,7 @@ export async function initRepo({ client, id, name, format = 'sha1', in: realms, 
     id,
     in: realms,
     content,
+    instruction: repoInstruction(makeRef(client.pubkey, id)),
     relations: {
       type_def: [{ ref: TYPE_REFS.GIT_REPOSITORY }],
       root: [{ ref: ROOT_REF }],
@@ -155,7 +156,10 @@ export async function openRepo({ client, repoRef }) {
       const existing = await client.get(addr)
       if (existing?.item && existing.item.type !== 'DELETED') return oid // immutable, already stored
       const relations = await objectRelations(otype, content)
-      await client.create({ type: OTYPE_TO_TYPE[otype], id, in: realms, content, relations })
+      await client.create({
+        type: OTYPE_TO_TYPE[otype], id, in: realms, content, relations,
+        instruction: OTYPE_INSTRUCTION[otype],
+      })
       return oid
     },
 
@@ -201,7 +205,10 @@ export async function openRepo({ client, repoRef }) {
       }
       if (targetOid) relations.target = [{ ref: await objRef(owner, repoId, targetOid) }]
 
-      await client.create({ type: 'GIT_REF', id, in: realms, content, relations }, { allowUpdate: exists })
+      await client.create({
+        type: 'GIT_REF', id, in: realms, content, relations,
+        instruction: REF_INSTRUCTION,
+      }, { allowUpdate: exists })
       return addr
     },
 

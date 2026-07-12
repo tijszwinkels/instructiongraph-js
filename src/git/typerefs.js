@@ -23,3 +23,28 @@ export const OTYPE_TO_TYPE = {
   blob: 'GIT_BLOB',
   tag: 'GIT_TAG',
 }
+
+/**
+ * Self-describing `instruction` strings, per the TYPE convention (rev 5): every
+ * object links its type via type_def AND carries an instruction telling readers
+ * to read the type before use. Kept constant per kind (never generated per
+ * object) so a subgraph stays usable in isolation without burning tokens.
+ */
+export const OTYPE_INSTRUCTION = {
+  commit: 'A git commit stored natively in the dataverse (immutable). Read the GIT_COMMIT type via relations.type_def before use.',
+  tree: 'A git tree: one directory snapshot, stored natively (immutable). Read the GIT_TREE type via relations.type_def before use.',
+  blob: 'Git file content stored natively (immutable blob). Read the GIT_BLOB type via relations.type_def before use.',
+  tag: 'An annotated git tag stored natively (immutable). Read the GIT_TAG type via relations.type_def before use.',
+}
+
+/** Short instruction for GIT_REF pointers. */
+export const REF_INSTRUCTION =
+  'A git ref: a mutable pointer (branch, tag, or HEAD) in a dataverse-hosted repository. Read the GIT_REF type via relations.type_def before use.'
+
+/**
+ * Richer instruction for the GIT_REPOSITORY anchor (the suggested instance
+ * instruction from the type). `{ref}` is replaced with the repository's ref.
+ */
+export function repoInstruction(ref) {
+  return `A git repository stored natively in the dataverse. Before reading or writing it, read the GIT_REPOSITORY type via relations.type_def (addressing and storage rules) and its related_types. Clone with \`git clone ig::${ref}\`.`
+}
