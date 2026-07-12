@@ -18,6 +18,12 @@ import { objId, objRef, refId } from './addressing.js'
 import { encodeRefContent, decodeRefContent } from './ref.js'
 import { TYPE_REFS, OTYPE_TO_TYPE } from './typerefs.js'
 
+// Hard ceiling on a single object's raw payload. The hub request cap is ~10 MB
+// including base64 (+33%) and the envelope, so ~7 MB of raw bytes is the most
+// that reliably round-trips. LFS-style pointers for larger files are future
+// work (per the GIT_BLOB / GIT_REPOSITORY types).
+const MAX_OBJECT_BYTES = 7 * 1024 * 1024
+
 /**
  * Create the GIT_REPOSITORY anchor object.
  * @param {object} o
@@ -136,6 +142,12 @@ export async function openRepo({ client, repoRef }) {
     /** Write an immutable git object; idempotent. Returns its oid. */
     async putObject(otype, payload) {
       requireOwner('write object')
+      if (payload.length > MAX_OBJECT_BYTES) {
+        throw new Error(
+          `${otype} object is ${payload.length} bytes, over the ${MAX_OBJECT_BYTES}-byte cap ` +
+          `(LFS-style pointers for large files are future work)`
+        )
+      }
       const content = await payloadToContent(otype, payload, format)
       const oid = content.oid
       const id = await objId(repoId, oid)

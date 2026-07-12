@@ -124,6 +124,14 @@ test('putRef CAS: expectedOldOid mismatch is rejected, correct value succeeds', 
   assert.equal((await repo.getRef('refs/heads/main')).targetOid, b)
 })
 
+test('putObject rejects an object over the size cap', async () => {
+  const { client } = await setup()
+  const repoRef = await initRepo({ client, id: crypto.randomUUID(), name: 'big', in: ['server-public'] })
+  const repo = await openRepo({ client, repoRef })
+  const huge = Buffer.alloc(7 * 1024 * 1024 + 1, 0x61)
+  await assert.rejects(() => repo.putObject('blob', huge), /over the .* cap/)
+})
+
 test('non-owner writes are rejected; reads still work (single-owner push)', async () => {
   const dataDir = mkdtempSync(join(tmpdir(), 'ig-store-own-'))
   const store = createFsStore({ dataDir, filter: null })
