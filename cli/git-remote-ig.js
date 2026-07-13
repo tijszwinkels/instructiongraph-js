@@ -28,8 +28,10 @@ import { fetchToLocal, pushToRemote } from '../src/git/transfer.js'
 // argv: [node, script, <arg1>, <arg2>]. For `ig::<ref>` git passes the address
 // (and, for a configured remote, its name first). Prefer the URL arg; strip the
 // transport prefix if present.
+// Everything after the first slash is a friendly directory hint for stock git
+// (`ig::<ref>/<name>`) and MUST be ignored for resolution.
 const urlArg = process.argv[3] || process.argv[2] || ''
-const repoRef = urlArg.replace(/^ig::/, '').replace(/^ig:\/\//, '')
+const repoRef = urlArg.replace(/^ig::/, '').replace(/^ig:\/\//, '').split('/')[0]
 
 let verbosity = 1
 const out = (s) => process.stdout.write(s)
@@ -76,8 +78,10 @@ async function getRepo({ createIfMissing = false } = {}) {
   // the private identity realm. Override with IG_GIT_REALM.
   const configDir = findConfigDir()
   const realm = process.env.IG_GIT_REALM || readConfig(configDir, 'default-realm', owner)
+  const name = basename(process.cwd()) || 'repo'
   log(`creating repository ${repoRef} in realm ${realm}`)
-  await initRepo({ client, id, name: basename(process.cwd()) || 'repo', format: 'sha1', in: [realm], defaultBranch: 'refs/heads/main' })
+  await initRepo({ client, id, name, format: 'sha1', in: [realm], defaultBranch: 'refs/heads/main' })
+  log(`created. clone with: git clone ig::${repoRef}/${name}`)
   _repo = await openRepo({ client, repoRef })
   return _repo
 }

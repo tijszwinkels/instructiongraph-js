@@ -136,7 +136,7 @@ Commands:
   ig realm set local                    Local only (never synced)
   ig realm set <realm>                  Set a specific realm
   ig git init [name] [--realm R]        Create a git repository; prints its ref
-                                          (clone/push with git clone ig::<ref>)
+  ig git clone <ref> [dir]              Clone a hosted repo (names dir after it)
 
 Run 'ig <command> --help' for command-specific help.`)
   process.exit(0)
@@ -154,7 +154,7 @@ function commandUsage(command) {
     identity: `Usage: ig identity [generate|activate|list] [options]\n\nShow or manage the active identity.\n\nFlags:\n  --identity N  Show info for identity N instead of the active one\n\nSubcommands:\n  ig identity generate [--name N] [--project] [--activate]\n  ig identity activate <name>\n  ig identity list\n\nEnvironment:\n  INSTRUCTIONGRAPH_DIR  Override config directory location`,
     server: `Usage: ig server [set <url> | login | logout | remove | push]\n\nShow, configure, or remove the hub server connection.\n\nSubcommands:\n  ig server              Show current server status and auth\n  ig server set <url>    Connect to a hub server for sync\n  ig server login        Log in with your active identity\n  ig server logout       Log out from the hub\n  ig server remove       Disconnect and go offline\n  ig server push [--all]  Push local objects (default: your realms only)\n\nWithout a server, all data stays on local filesystem only.\nWith a server, objects sync between local storage and the hub.\nLogin uses your active identity (see ig identity).`,
     realm: `Usage: ig realm [set <realm|identity|dataverse001|server-public|local>]\n\nShow or set the default realm used for new objects.\n\n  ig realm set identity       Use current identity\'s realm (private)\n  ig realm set dataverse001   Use the public dataverse realm\n  ig realm set server-public  Public on this hub, not propagated globally\n  ig realm set local          Local only \u2014 never synced to any server\n  ig realm set <pubkey>       Use any specific realm`,
-    git: `Usage: ig git init [name] [--realm R] [--identity N]\n\nCreate a native git repository hosted on instructionGraph. Prints the new\nrepository ref; clone or push to it with the git-remote-ig helper:\n\n  git clone ig::<ref>\n  git remote add origin ig::<ref> && git push -u origin main\n\nThe repository and its objects live in your default realm unless --realm is\ngiven. Only your identity can push to it; others fork to contribute.`,
+    git: `Usage: ig git init [name] [--realm R] [--identity N]\n       ig git clone <ref> [dir] [--identity N]\n\nHost git repositories on instructionGraph (git-remote-ig helper).\n\ninit  Create a repository; prints its ref. Push/clone with:\n        git remote add origin ig::<ref> && git push -u origin main\n        git clone ig::<ref>/<name>\n      The /<name> suffix is ignored for resolution; it just gives stock git a\n      friendly checkout directory. Repo lives in your default realm unless\n      --realm is given. Only your identity can push; others fork to contribute.\n\nclone Clone a hosted repository, naming the checkout directory after the repo\n      (or [dir] if given).`,
   }
 
   if (!docs[command]) die(`Unknown command: ${command}\nRun 'ig --help' for usage.`)
@@ -1063,9 +1063,29 @@ async function main() {
           defaultBranch: 'refs/heads/main',
         })
         console.log(ref)
-        console.error(`Created GIT_REPOSITORY "${name}". Clone or push with:\n  git clone ig::${ref}\n  git remote add origin ig::${ref}`)
+        console.error(
+          `Created GIT_REPOSITORY "${name}". Clone or push with:\n` +
+          `  git clone ig::${ref}/${name}\n` +
+          `  git remote add origin ig::${ref} && git push -u origin main`
+        )
+      } else if (subcmd === 'clone') {
+        validateFlags('git clone', args.slice(2), { valueFlags: ['identity'] })
+        const rawRef = args[2]
+        if (!rawRef) die('Usage: ig git clone <ref> [dir]')
+        const cleanRef = rawRef.replace(/^ig::/, '').split('/')[0]
+        const identityName = flag('identity')
+        const hasIdentity = !!resolveIdentityConfig(findConfigDir())
+        const ctx = await makeClient({ identityName, authenticate: hasIdentity })
+        const env = await ctx.client.get(cleanRef).catch(() => null)
+        const name = env?.item?.content?.name || cleanRef
+        const positional = args[3] && !args[3].startsWith('-') ? args[3] : null
+        const { spawnSync } = await import('node:child_process')
+        const cloneArgs = ['clone', `ig::${cleanRef}/${name}`]
+        if (positional) cloneArgs.push(positional)
+        const r = spawnSync('git', cloneArgs, { stdio: 'inherit' })
+        process.exit(r.status == null ? 1 : r.status)
       } else {
-        die('Usage: ig git init [name] [--realm R] [--identity N]')
+        die('Usage: ig git [init [name] [--realm R] | clone <ref> [dir]]')
       }
       break
     }

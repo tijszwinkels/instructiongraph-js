@@ -11,7 +11,7 @@
 import { test, before, after } from 'node:test'
 import assert from 'node:assert/strict'
 import { execFileSync } from 'node:child_process'
-import { rmSync, writeFileSync, mkdtempSync, readFileSync, readlinkSync, statSync } from 'node:fs'
+import { rmSync, writeFileSync, mkdtempSync, readFileSync, readlinkSync, statSync, existsSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -166,6 +166,39 @@ test('documented flow: `ig git init` then push to the pre-created anchor', () =>
   rmSync(clone, { recursive: true, force: true })
   rclone(`ig::${ref}`, clone)
   assert.equal(rgit(clone, ['rev-parse', 'HEAD']).trim(), rgit(src.dir, ['rev-parse', 'main']).trim())
+})
+
+test('friendly clone URL ig::<ref>/<name> derives the dir and is ignored for resolution', () => {
+  const igCli = fileURLToPath(new URL('../cli/ig.js', import.meta.url))
+  const ref = execFileSync('node', [igCli, 'git', 'init', 'myrepo', '--realm', 'server-public'], { env }).toString().trim()
+  const src = buildFixtureRepo()
+  cleanup.push(src.dir)
+  rgit(src.dir, ['remote', 'add', 'origin', `ig::${ref}`])
+  rgit(src.dir, ['push', 'origin', 'main'])
+
+  const parent = mkTmp('ig-e2e-friendly-')
+  cleanup.push(parent)
+  // stock git derives the checkout dir from the URL basename after the slash
+  execFileSync('git', ['clone', '--quiet', `ig::${ref}/coolname`], { env, cwd: parent, maxBuffer: 1 << 26 })
+  assert.ok(existsSync(join(parent, 'coolname')), 'checkout dir taken from the friendly URL basename')
+  assert.equal(execFileSync('git', ['-C', join(parent, 'coolname'), 'rev-parse', 'HEAD'], { env }).toString().trim(),
+               rgit(src.dir, ['rev-parse', 'main']).trim())
+})
+
+test('`ig git clone <ref>` checks out into a directory named after the repo', () => {
+  const igCli = fileURLToPath(new URL('../cli/ig.js', import.meta.url))
+  const ref = execFileSync('node', [igCli, 'git', 'init', 'porcelain-demo', '--realm', 'server-public'], { env }).toString().trim()
+  const src = buildFixtureRepo()
+  cleanup.push(src.dir)
+  rgit(src.dir, ['remote', 'add', 'origin', `ig::${ref}`])
+  rgit(src.dir, ['push', 'origin', 'main'])
+
+  const parent = mkTmp('ig-e2e-porcelain-')
+  cleanup.push(parent)
+  execFileSync('node', [igCli, 'git', 'clone', ref], { env, cwd: parent, maxBuffer: 1 << 26 })
+  assert.ok(existsSync(join(parent, 'porcelain-demo')), 'dir named after content.name')
+  assert.equal(execFileSync('git', ['-C', join(parent, 'porcelain-demo'), 'rev-parse', 'HEAD'], { env }).toString().trim(),
+               rgit(src.dir, ['rev-parse', 'main']).trim())
 })
 
 test('deleting a branch via push removes it from ls-remote', () => {

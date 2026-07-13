@@ -286,11 +286,19 @@ branch/tag/HEAD becomes a `GIT_REF`. Inspect one with `ig get`, or list the refs
 with `git ls-remote origin`.
 
 Clone it back somewhere else (any machine where the same store/identity is
-reachable — including fully offline):
+reachable — including fully offline). `ig git clone` names the checkout
+directory after the repository for you:
 
 ```bash
-git clone ig::AxyU5_....a4c83bde-... myproject-clone
-cd myproject-clone && git log --oneline    # history intact, git fsck clean
+ig git clone AxyU5_....a4c83bde-...
+cd myproject && git log --oneline          # history intact, git fsck clean
+```
+
+With stock git, append a friendly name so the directory isn't the raw ref (the
+part after the slash is ignored when resolving the repo):
+
+```bash
+git clone ig::AxyU5_....a4c83bde-.../myproject
 ```
 
 Only your identity can push to a repository you own; to contribute to someone

@@ -117,8 +117,16 @@ git remote add origin ig::<ref>
 git push -u origin main            # and: git push origin --tags
 
 # 3. Clone it back anywhere the same store/identity is reachable
-git clone ig::<ref> myproject-clone
+ig git clone <ref>                 # checks out into a dir named after the repo
+# …or with stock git, add a friendly name so the checkout dir isn't the raw ref:
+git clone ig::<ref>/myproject
 ```
+
+The `/<name>` suffix on a clone URL is **ignored for resolution** — it only lets
+stock git derive a readable checkout directory from the URL basename instead of
+the raw ref. `ig git init` and the first push print the suggested `ig::<ref>/<name>`
+form for you to copy. Every stored object also carries an `item.name` display
+hint (commit → first message line, blob/tree → path, ref → refname).
 
 **How it works.** Git's immutable objects (commit/tree/blob/tag) become
 never-revised graph objects at deterministic addresses
