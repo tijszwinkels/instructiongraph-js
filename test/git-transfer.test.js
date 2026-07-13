@@ -17,6 +17,7 @@ import { createFsStore } from '../src/store/fs.js'
 import { buildFixtureRepo, git, mkTmp } from '../test-support/git-fixture.js'
 import { throwawayIdentity } from '../test-support/throwaway-identity.js'
 import { initRepo, openRepo } from '../src/git/repo.js'
+import { objRef } from '../src/git/addressing.js'
 import { pushToRemote } from '../src/git/transfer.js'
 
 async function freshRepo() {
@@ -27,7 +28,7 @@ async function freshRepo() {
   await client.ready
   const repoRef = await initRepo({ client, id: crypto.randomUUID(), name: 'xfer', in: ['server-public'] })
   const repo = await openRepo({ client, repoRef })
-  return { repo, dataDir }
+  return { repo, dataDir, client }
 }
 
 test('a non-commit object cannot be pushed to a branch', async () => {
@@ -62,6 +63,27 @@ test('a shallow repository refuses object-bearing pushes but allows deletes', as
 
   rmSync(fx.dir, { recursive: true, force: true })
   rmSync(shallow, { recursive: true, force: true })
+  rmSync(dataDir, { recursive: true, force: true })
+})
+
+test('push threads first-seen paths as item.name (blob path, root tree = repo name)', async () => {
+  const { repo, dataDir, client } = await freshRepo()
+  const fx = buildFixtureRepo()
+  const gitDir = join(fx.dir, '.git')
+  await pushToRemote({ repo, gitDir, pushes: [{ src: 'main', dst: 'refs/heads/main', force: false }] })
+
+  const itemFor = async (oid) => (await client.get(await objRef(repo.owner, repo.repoId, oid))).item
+
+  const readme = execFileSync('git', ['-C', fx.dir, 'rev-parse', 'main:readme.md']).toString().trim()
+  assert.equal((await itemFor(readme)).name, 'readme.md', 'blob named after its path')
+
+  const subfile = execFileSync('git', ['-C', fx.dir, 'rev-parse', 'main:lib/core.js']).toString().trim()
+  assert.equal((await itemFor(subfile)).name, 'lib/core.js', 'nested blob keeps its full path')
+
+  const rootTree = execFileSync('git', ['-C', fx.dir, 'rev-parse', 'main^{tree}']).toString().trim()
+  assert.equal((await itemFor(rootTree)).name, 'xfer', 'root tree named after the repo')
+
+  rmSync(fx.dir, { recursive: true, force: true })
   rmSync(dataDir, { recursive: true, force: true })
 })
 

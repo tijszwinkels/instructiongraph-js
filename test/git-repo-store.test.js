@@ -82,6 +82,46 @@ test('written objects are self-describing: type_def relation + instruction', asy
   assert.match(refObj.instruction || '', /GIT_REF type via relations\.type_def/)
 })
 
+test('written objects carry item.name display hints (per kind)', async () => {
+  const { client } = await setup()
+  const repoRef = await initRepo({ client, id: crypto.randomUUID(), name: 'named-repo', in: ['server-public'] })
+  const anchor = (await client.get(repoRef)).item
+  assert.equal(anchor.name, 'named-repo', 'anchor item.name mirrors content.name')
+
+  const repo = await openRepo({ client, repoRef })
+  const fx = buildFixtureRepo()
+  const get = async (oid) => (await client.get(await objRef(repo.owner, repo.repoId, oid))).item
+
+  // blob → explicit first-seen path
+  const boid = await repo.putObject('blob', Buffer.from('x\n'), { name: 'src/app.js' })
+  assert.equal((await get(boid)).name, 'src/app.js')
+
+  // commit → first line of the message
+  const merge = fx.objects.find(o => o.type === 'commit' && o.oid === fx.head)
+  const coid = await repo.putObject('commit', merge.payload)
+  assert.equal((await get(coid)).name, 'merge side')
+
+  // annotated tag → tag name
+  const tagObj = fx.objects.find(o => o.type === 'tag')
+  const toid = await repo.putObject('tag', tagObj.payload)
+  assert.equal((await get(toid)).name, 'v1.0')
+
+  // tree with no path → repo name (root tree)
+  const rootTreeOid = fx.objects.find(o => o.type === 'commit' && o.oid === fx.head)
+  const { parseCommit } = await import('../src/git/codec.js')
+  const rootOid = parseCommit(merge.payload).tree
+  const rootPayload = fx.objects.find(o => o.oid === rootOid).payload
+  const troid = await repo.putObject('tree', rootPayload)
+  assert.equal((await get(troid)).name, 'named-repo', 'root tree names after the repo')
+
+  // ref → refname
+  await repo.putRef('refs/heads/main', { targetOid: coid })
+  const refItem = (await client.get((await repo.getRef('refs/heads/main')).addr)).item
+  assert.equal(refItem.name, 'refs/heads/main')
+
+  rmSync(fx.dir, { recursive: true, force: true })
+})
+
 test('putObject is idempotent (immutable) and stored at the computed address', async () => {
   const { client } = await setup()
   const repoRef = await initRepo({ client, id: crypto.randomUUID(), name: 'idem', in: ['server-public'] })

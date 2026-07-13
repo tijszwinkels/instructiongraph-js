@@ -15,7 +15,7 @@
 import { parseCommit, parseTree, parseTag } from './codec.js'
 import {
   writeLooseObject, catFileBatch, catFile, catFileType,
-  revParse, revListObjects, isAncestor, objectExists, isShallow,
+  revParse, revListObjectsWithPaths, isAncestor, objectExists, isShallow,
 } from './gitio.js'
 
 // ─── Fetch (clone / fetch) ────────────────────────────────────────
@@ -65,14 +65,17 @@ export async function fetchToLocal({ repo, gitDir, wants }) {
 
 // ─── Push ─────────────────────────────────────────────────────────
 
-/** Store a list of local oids into the graph (immutable, idempotent). */
-async function uploadObjects(repo, gitDir, oids) {
+/**
+ * Store a list of local oids into the graph (immutable, idempotent).
+ * @param {Map<string,string>} [names] oid → first-seen path (display hint)
+ */
+async function uploadObjects(repo, gitDir, oids, names) {
   if (!oids.length) return
   const recs = catFileBatch(gitDir, oids)
   for (const oid of oids) {
     const rec = recs.get(oid)
     if (!rec) throw new Error(`local object ${oid} not found`)
-    const stored = await repo.putObject(rec.type, rec.payload)
+    const stored = await repo.putObject(rec.type, rec.payload, { name: names?.get(oid) })
     if (stored !== oid) throw new Error(`oid drift storing ${oid} → ${stored}`)
   }
 }
@@ -127,9 +130,13 @@ async function pushOne({ repo, gitDir, push, remoteRefs, localKnownTips }) {
     }
   }
 
-  // enumerate + upload: commit/tree/blob objects first, then the tag chain
-  const objOids = revListObjects(gitDir, commitOid, localKnownTips)
-  await uploadObjects(repo, gitDir, objOids)
+  // enumerate + upload: commit/tree/blob objects first, then the tag chain.
+  // Keep each object's first-seen path as its display name (root tree/commits
+  // have no path — repo.js names those after the repo / the commit message).
+  const entries = revListObjectsWithPaths(gitDir, commitOid, localKnownTips)
+  const objOids = entries.map(e => e.oid)
+  const names = new Map(entries.filter(e => e.path).map(e => [e.oid, e.path]))
+  await uploadObjects(repo, gitDir, objOids, names)
   await uploadObjects(repo, gitDir, [...tagOids].reverse())
 
   await repo.putRef(dst, { targetOid: tipOid, peeledOid }, { expectedOldOid: currentOid })

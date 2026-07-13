@@ -126,6 +126,23 @@ export function revListObjects(gitDir, tip, notTips = []) {
   return oids
 }
 
+/**
+ * Like revListObjects but keeps each object's path (for display names).
+ * Commits and the root tree have an empty path.
+ * @returns {{oid:string, path:string}[]}
+ */
+export function revListObjectsWithPaths(gitDir, tip, notTips = []) {
+  const args = ['rev-list', '--objects', tip, ...notTips.map(t => `^${t}`)]
+  const text = runGit(gitDir, args).toString('utf-8')
+  const out = []
+  for (const line of text.split('\n')) {
+    if (!line) continue
+    const sp = line.indexOf(' ')
+    out.push(sp === -1 ? { oid: line, path: '' } : { oid: line.slice(0, sp), path: line.slice(sp + 1) })
+  }
+  return out
+}
+
 /** True if `ancestor` is an ancestor of `descendant`. */
 export function isAncestor(gitDir, ancestor, descendant) {
   try {

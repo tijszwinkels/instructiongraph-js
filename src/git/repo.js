@@ -45,6 +45,7 @@ export async function initRepo({ client, id, name, format = 'sha1', in: realms, 
     type: 'GIT_REPOSITORY',
     id,
     in: realms,
+    name, // item.name mirrors content.name (normative)
     content,
     instruction: repoInstruction(makeRef(client.pubkey, id)),
     relations: {
@@ -113,6 +114,22 @@ export async function openRepo({ client, repoRef }) {
     return relations
   }
 
+  /**
+   * Best-effort `item.name` display hint per kind (constant rules, no prose):
+   * commit → first message line (~72 chars); tag → tag name; tree → its path
+   * (root tree → repo name); blob → first-seen path. Undefined if unknown.
+   */
+  function objectName(otype, content, name) {
+    if (otype === 'commit') {
+      const first = (content.commit?.message || '').split('\n', 1)[0].trim()
+      return first ? first.slice(0, 72) : undefined
+    }
+    if (otype === 'tag') return content.tag?.tag || undefined
+    if (otype === 'tree') return name || repo.content?.name || undefined
+    if (otype === 'blob') return name || undefined
+    return name || undefined
+  }
+
   const api = {
     ref: repoRef,
     owner,
@@ -140,8 +157,12 @@ export async function openRepo({ client, repoRef }) {
       return !!(e?.item && e.item.type !== 'DELETED')
     },
 
-    /** Write an immutable git object; idempotent. Returns its oid. */
-    async putObject(otype, payload) {
+    /**
+     * Write an immutable git object; idempotent. Returns its oid.
+     * `name` is a best-effort first-seen path (for tree/blob) supplied by the
+     * caller; commit/tag names are derived from the payload.
+     */
+    async putObject(otype, payload, { name } = {}) {
       requireOwner('write object')
       if (payload.length > MAX_OBJECT_BYTES) {
         throw new Error(
@@ -158,6 +179,7 @@ export async function openRepo({ client, repoRef }) {
       const relations = await objectRelations(otype, content)
       await client.create({
         type: OTYPE_TO_TYPE[otype], id, in: realms, content, relations,
+        name: objectName(otype, content, name),
         instruction: OTYPE_INSTRUCTION[otype],
       })
       return oid
@@ -207,6 +229,7 @@ export async function openRepo({ client, repoRef }) {
 
       await client.create({
         type: 'GIT_REF', id, in: realms, content, relations,
+        name: refname,
         instruction: REF_INSTRUCTION,
       }, { allowUpdate: exists })
       return addr
