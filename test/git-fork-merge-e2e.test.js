@@ -93,7 +93,8 @@ function seedUpstream() {
 /** Bob forks, clones the fork, commits C2 on `feature`, pushes (thin). */
 function contributorFork(upstreamRef) {
   setActiveIdentity(store, 'bob')
-  const forkRef = ig(tmpdir(), ['git', 'fork', upstreamRef, '--name', 'fork', '--identity', 'bob']).trim()
+  // flags before the positional ref — guards the arg-order parse fix
+  const forkRef = ig(tmpdir(), ['git', 'fork', '--identity', 'bob', '--name', 'fork', upstreamRef]).trim()
 
   const clone = mkTmp('ig-fm-forkclone-')
   cleanup.push(clone)

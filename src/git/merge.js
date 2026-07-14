@@ -115,7 +115,17 @@ export async function mergeIntoUpstream({
   // ── plain local git: fast-forward, or a merge commit ──
   let newTip, kind
   if (canFF && mode !== 'no-ff') {
-    runGitWorktree(worktree, ['merge', '--ff-only', sourceTip])
+    // canFF only proves ancestry; the ff can still fail on a dirty tree, an
+    // untracked file that would be overwritten, or a stray index.lock. Surface
+    // an actionable message instead of a raw git dump (no --abort needed —
+    // --ff-only creates no merge state on failure).
+    try {
+      runGitWorktree(worktree, ['merge', '--ff-only', sourceTip])
+    } catch (e) {
+      throw new Error(
+        `fast-forward of ${targetRef} failed — is the working tree clean and on that branch? ${firstLine(e)}`
+      )
+    }
     kind = 'fast-forward'
   } else {
     const msg = message || `Merge ${sourceBranch || srcBranch} from ${sourceRef}`

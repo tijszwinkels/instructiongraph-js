@@ -137,3 +137,69 @@ test('--ff-only refuses a diverged branch; --no-ff then makes a merge commit', a
   assert.equal(c2Copy.relations.merges, undefined, 'non-head fork object has no merges')
   cleanup(s)
 })
+
+test('a conflicting --no-ff merge aborts cleanly and leaves the ref untouched', async () => {
+  const s = await scenario()
+  // owner rewrites the SAME line the fork touched, so a 3-way merge conflicts.
+  writeFileSync(join(s.ownerWork, 'readme.md'), 'hello\nowner-only\n')
+  sh(s.ownerWork, ['add', '-A']); sh(s.ownerWork, ['commit', '-q', '-m', 'c3 owner edit'],
+    { GIT_AUTHOR_NAME: 'Owner', GIT_AUTHOR_EMAIL: 'owner@example.com', GIT_COMMITTER_NAME: 'Owner', GIT_COMMITTER_EMAIL: 'owner@example.com' })
+  const c3 = sh(s.ownerWork, ['rev-parse', 'HEAD']).trim()
+  const upstream = await openRepo({ client: s.aliceClient, repoRef: s.upstreamRef })
+  await pushToRemote({ repo: upstream, gitDir: s.ownerGitDir, pushes: [{ src: 'refs/heads/main', dst: 'refs/heads/main', force: false }] })
+
+  await assert.rejects(
+    () => mergeIntoUpstream({ client: s.aliceClient, gitDir: s.ownerGitDir, worktree: s.ownerWork, sourceRef: s.forkRef, sourceBranch: 'feature', mode: 'no-ff' }),
+    /conflict/i
+  )
+  // abort worked: no MERGE_HEAD, working tree back at C3
+  assert.throws(() => sh(s.ownerWork, ['rev-parse', '--verify', '-q', 'MERGE_HEAD']), 'MERGE_HEAD cleared by --abort')
+  assert.equal(sh(s.ownerWork, ['rev-parse', 'HEAD']).trim(), c3)
+  // upstream ref never advanced
+  assert.equal((await upstream.getRef('refs/heads/main')).targetOid, c3, 'ref untouched after a failed merge')
+  cleanup(s)
+})
+
+test('re-merging an already-merged branch is a no-op (up-to-date)', async () => {
+  const s = await scenario()
+  const first = await mergeIntoUpstream({ client: s.aliceClient, gitDir: s.ownerGitDir, worktree: s.ownerWork, sourceRef: s.forkRef, sourceBranch: 'feature' })
+  assert.equal(first.newTip, s.c2)
+  const again = await mergeIntoUpstream({ client: s.aliceClient, gitDir: s.ownerGitDir, worktree: s.ownerWork, sourceRef: s.forkRef, sourceBranch: 'feature' })
+  assert.equal(again.kind, 'up-to-date')
+  assert.deepEqual(again.copied, [])
+  assert.equal(again.newTip, s.c2)
+  cleanup(s)
+})
+
+test('merge bootstraps content into an empty upstream (base === null)', async () => {
+  // upstream created but never pushed to (no refs); a fork carries the first commit.
+  const dataDir = mkd('ig-merge-empty-')
+  const store = createFsStore({ dataDir, filter: null })
+  const alice = await throwawayIdentity(); const bob = await throwawayIdentity()
+  const aliceClient = createClient({ store, identity: alice.identity }); await aliceClient.ready
+  const bobClient = createClient({ store, identity: bob.identity }); await bobClient.ready
+
+  const upstreamRef = await initRepo({ client: aliceClient, id: crypto.randomUUID(), name: 'empty', in: ['server-public'], defaultBranch: 'refs/heads/main' })
+  const { ref: forkRef } = await forkRepo({ client: bobClient, upstreamRef })
+
+  // bob builds C1 locally and pushes it to the fork's main
+  const up = mkd('ig-merge-empty-up-')
+  sh(up, ['init', '-q', '-b', 'main'])
+  writeFileSync(join(up, 'readme.md'), 'first\n'); sh(up, ['add', '-A']); sh(up, ['commit', '-q', '-m', 'c1'])
+  const c1 = sh(up, ['rev-parse', 'HEAD']).trim()
+  const fork = await openRepo({ client: bobClient, repoRef: forkRef })
+  await pushToRemote({ repo: fork, gitDir: join(up, '.git'), pushes: [{ src: 'refs/heads/main', dst: 'refs/heads/main', force: false }] })
+
+  // owner has an empty (unborn-HEAD) checkout of the still-empty upstream
+  const ownerWork = mkd('ig-merge-empty-owner-')
+  sh(ownerWork, ['init', '-q', '-b', 'main'])
+  sh(ownerWork, ['config', 'user.name', 'Owner']); sh(ownerWork, ['config', 'user.email', 'owner@example.com'])
+
+  const res = await mergeIntoUpstream({ client: aliceClient, gitDir: join(ownerWork, '.git'), worktree: ownerWork, sourceRef: forkRef, sourceBranch: 'main' })
+  assert.equal(res.base, null)
+  assert.equal(res.newTip, c1)
+  const upstream = await openRepo({ client: aliceClient, repoRef: upstreamRef })
+  assert.equal((await upstream.getRef('refs/heads/main')).targetOid, c1, 'empty upstream main created at C1')
+
+  for (const d of [dataDir, up, ownerWork]) try { rmSync(d, { recursive: true, force: true }) } catch {}
+})

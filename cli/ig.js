@@ -1149,7 +1149,7 @@ async function main() {
         process.exit(r.status == null ? 1 : r.status)
       } else if (subcmd === 'fork') {
         validateFlags('git fork', args.slice(2), { valueFlags: ['identity', 'realm', 'name'] })
-        const rawRef = args[2] && !args[2].startsWith('-') ? args[2] : null
+        const [rawRef] = positionals(args.slice(2), ['identity', 'realm', 'name'])
         if (!rawRef) die('Usage: ig git fork <upstream-ref> [--name N] [--realm R]')
         const upstreamRef = rawRef.replace(/^ig::/, '').split('/')[0]
         const identityName = flag('identity')
