@@ -24,8 +24,13 @@ import { createClient } from '../src/client.js'
 import { createHubStore } from '../src/store/hub.js'
 import { createFsStore } from '../src/store/fs.js'
 import { createSyncStore } from '../src/store/sync.js'
-import { isVisible, loadSharedRealms } from '../src/store/realm-filter.js'
 import { generateKeypair } from '../src/crypto.js'
+import {
+  homeConfigDir, findConfigDir, readConfig, writeConfig,
+  resolveIdentityConfig, resolveIdentityPemPath, resolveRealmAlias,
+  listIdentityNames, listLocalIdentityNames,
+  openRuntime as makeClient,
+} from './runtime.js'
 
 const args = process.argv.slice(2)
 const cmd = args[0]
@@ -130,6 +135,10 @@ Commands:
   ig realm set dataverse001             Go public
   ig realm set local                    Local only (never synced)
   ig realm set <realm>                  Set a specific realm
+  ig git init [name] [--realm R]        Create a git repository; prints its ref
+  ig git clone <ref> [dir]              Clone a hosted repo (names dir after it)
+  ig git fork <upstream> [--name N]     Thin-fork a repo you can contribute to
+  ig git merge <fork> [branch]          Merge a fork branch into upstream (owner)
 
 Run 'ig <command> --help' for command-specific help.`)
   process.exit(0)
@@ -146,7 +155,8 @@ function commandUsage(command) {
 
     identity: `Usage: ig identity [generate|activate|list] [options]\n\nShow or manage the active identity.\n\nFlags:\n  --identity N  Show info for identity N instead of the active one\n\nSubcommands:\n  ig identity generate [--name N] [--project] [--activate]\n  ig identity activate <name>\n  ig identity list\n\nEnvironment:\n  INSTRUCTIONGRAPH_DIR  Override config directory location`,
     server: `Usage: ig server [set <url> | login | logout | remove | push]\n\nShow, configure, or remove the hub server connection.\n\nSubcommands:\n  ig server              Show current server status and auth\n  ig server set <url>    Connect to a hub server for sync\n  ig server login        Log in with your active identity\n  ig server logout       Log out from the hub\n  ig server remove       Disconnect and go offline\n  ig server push [--all]  Push local objects (default: your realms only)\n\nWithout a server, all data stays on local filesystem only.\nWith a server, objects sync between local storage and the hub.\nLogin uses your active identity (see ig identity).`,
-    realm: `Usage: ig realm [set <realm|identity|dataverse001|server-public|local>]\n\nShow or set the default realm used for new objects.\n\n  ig realm set identity       Use current identity\'s realm (private)\n  ig realm set dataverse001   Use the public dataverse realm\n  ig realm set server-public  Public on this hub, not propagated globally\n  ig realm set local          Local only \u2014 never synced to any server\n  ig realm set <pubkey>       Use any specific realm`
+    realm: `Usage: ig realm [set <realm|identity|dataverse001|server-public|local>]\n\nShow or set the default realm used for new objects.\n\n  ig realm set identity       Use current identity\'s realm (private)\n  ig realm set dataverse001   Use the public dataverse realm\n  ig realm set server-public  Public on this hub, not propagated globally\n  ig realm set local          Local only \u2014 never synced to any server\n  ig realm set <pubkey>       Use any specific realm`,
+    git: `Usage: ig git init [name] [--realm R] [--identity N]\n       ig git clone <ref> [dir] [--identity N]\n       ig git fork <upstream-ref> [--name N] [--realm R] [--identity N]\n       ig git merge <fork-ref> [branch] [--into <upstream>] [--onto <refname>]\n                    [--ff-only | --no-ff] [--message M] [--identity N]\n\nHost git repositories on instructionGraph (git-remote-ig helper).\n\ninit  Create a repository; prints its ref. Push/clone with:\n        git remote add origin ig::<ref> && git push -u origin main\n        git clone ig::<ref>/<name>\n      The /<name> suffix is ignored for resolution; it just gives stock git a\n      friendly checkout directory. Repo lives in your default realm unless\n      --realm is given. Only your identity can push; others fork to contribute.\n\nclone Clone a hosted repository, naming the checkout directory after the repo\n      (or [dir] if given).\n\nfork  Thin-fork an upstream repo (O(1)): a new anchor with forked_from -> the\n      upstream plus a mirrored default branch, no objects copied. You own the\n      fork and can push to it; reads fall through to upstream. Inherits the\n      upstream realm unless --realm is given. Prints the fork ref.\n\nmerge Merge a fork branch back into an upstream you OWN (run from a clone of\n      the upstream, target branch checked out). Fetches the fork delta, runs\n      plain local git (fast-forward or, with --no-ff, a merge commit), signs\n      owner-copies of the new objects into your namespace (each carrying\n      copied_from -> the contributor's original), and CAS-updates the ref.\n      --into defaults to the fork's forked_from upstream; --onto to its\n      default branch. --ff-only refuses a non-fast-forward.`,
   }
 
   if (!docs[command]) die(`Unknown command: ${command}\nRun 'ig --help' for usage.`)
@@ -154,244 +164,6 @@ function commandUsage(command) {
   process.exit(0)
 }
 
-// ─── Config resolution ───────────────────────────────────────────
-
-function homeConfigDir() {
-  return join(process.env.HOME || '~', '.instructionGraph')
-}
-
-function findConfigDir() {
-  // 1. Env var override
-  if (process.env.INSTRUCTIONGRAPH_DIR) return process.env.INSTRUCTIONGRAPH_DIR
-
-  // 2. Walk up from cwd for project-local .instructionGraph/
-  let dir = process.cwd()
-  while (dir !== '/') {
-    const igDir = join(dir, '.instructionGraph')
-    if (existsSync(join(igDir, 'config')) || existsSync(join(igDir, 'data')) || existsSync(join(igDir, 'identities'))) return igDir
-    dir = resolve(dir, '..')
-  }
-
-  // 3. Default: ~/.instructionGraph (always - never null)
-  return homeConfigDir()
-}
-
-function readConfig(configDir, name, defaultVal) {
-  const localPath = join(configDir, 'config', name)
-  if (existsSync(localPath)) return readFileSync(localPath, 'utf-8').trim()
-
-  // Fall back to home config if configDir is project-local
-  // Skip fallback when INSTRUCTIONGRAPH_DIR is set (fully self-contained)
-  if (!process.env.INSTRUCTIONGRAPH_DIR) {
-    const home = homeConfigDir()
-    if (configDir !== home) {
-      const homePath = join(home, 'config', name)
-      if (existsSync(homePath)) return readFileSync(homePath, 'utf-8').trim()
-    }
-  }
-  return defaultVal
-}
-
-function resolveIdentityConfig(configDir) {
-  const identityName = readConfig(configDir, 'active-identity', 'default')
-
-  // Check configDir first, then home (if different)
-  // Skip fallback when INSTRUCTIONGRAPH_DIR is set (fully self-contained)
-  const candidates = [join(configDir, 'identities', identityName, 'private.pem')]
-  if (!process.env.INSTRUCTIONGRAPH_DIR) {
-    const home = homeConfigDir()
-    if (configDir !== home) {
-      candidates.push(join(home, 'identities', identityName, 'private.pem'))
-    }
-  }
-
-  for (const pemPath of candidates) {
-    if (existsSync(pemPath)) {
-      return { type: 'pem-file', path: pemPath, name: identityName }
-    }
-  }
-  return null
-}
-
-function writeConfig(configDir, name, value) {
-  const configPath = join(configDir, 'config')
-  mkdirSync(configPath, { recursive: true })
-  writeFileSync(join(configPath, name), `${value}\n`)
-}
-
-/**
- * Resolve well-known realm aliases (e.g. 'identity') to their actual values.
- * @param {string|undefined} realm - Raw realm string from --realm flag
- * @param {string} configDir - Config directory for identity lookup
- * @param {string|null} [identityName] - Explicit identity name (from --identity flag)
- * @returns {Promise<string|undefined>} Resolved realm string, or undefined if input was undefined
- */
-async function resolveRealmAlias(realm, configDir, identityName) {
-  if (realm === undefined) return undefined
-  if (realm === 'identity') {
-    const name = identityName || readConfig(configDir, 'active-identity', 'default')
-    const pemPath = resolveIdentityPemPath(configDir, name)
-    if (!pemPath) die(`No identity '${name}' found. Run 'ig identity generate' first.`)
-    const { importPEM } = await import('../src/identity.js')
-    const kp = await importPEM(readFileSync(pemPath, 'utf-8'))
-    return kp.pubkey
-  }
-  return realm
-}
-
-function resolveIdentityPemPath(configDir, identityName) {
-  const candidates = [join(configDir, 'identities', identityName, 'private.pem')]
-  if (!process.env.INSTRUCTIONGRAPH_DIR) {
-    const home = homeConfigDir()
-    if (configDir !== home) {
-      candidates.push(join(home, 'identities', identityName, 'private.pem'))
-    }
-  }
-  return candidates.find(existsSync) || null
-}
-
-/** List identities only in the given configDir (no home fallback). */
-function listLocalIdentityNames(configDir) {
-  const dir = join(configDir, 'identities')
-  const names = []
-  if (!existsSync(dir)) return names
-  for (const entry of readdirSync(dir, { withFileTypes: true })) {
-    if (!entry.isDirectory()) continue
-    if (existsSync(join(dir, entry.name, 'private.pem'))) names.push(entry.name)
-  }
-  return names.sort()
-}
-
-function listIdentityNames(configDir) {
-  const dirs = [join(configDir, 'identities')]
-  if (!process.env.INSTRUCTIONGRAPH_DIR) {
-    const home = homeConfigDir()
-    if (configDir !== home) dirs.push(join(home, 'identities'))
-  }
-
-  const names = new Set()
-  for (const dir of dirs) {
-    if (!existsSync(dir)) continue
-    for (const entry of readdirSync(dir, { withFileTypes: true })) {
-      if (!entry.isDirectory()) continue
-      if (existsSync(join(dir, entry.name, 'private.pem'))) names.add(entry.name)
-    }
-  }
-  return [...names].sort()
-}
-
-/**
- * @param {object} [overrides]
- * @param {string} [overrides.identityName] - Use a specific identity instead of active
- * @param {string} [overrides.realm] - Override the default realm
- * @param {string} [overrides.token] - Override the auth token
- * @param {boolean} [overrides.authenticate] - Authenticate with hub on connect
- * @param {boolean} [overrides.skipRealmCheck] - Disable realm filtering (--raw)
- */
-async function makeClient(overrides = {}) {
-  const configDir = findConfigDir()
-  const hubUrl = readConfig(configDir, 'hub-url', null)  // null = no server configured
-  const defaultRealm = overrides.realm || readConfig(configDir, 'default-realm', null)
-  const dataDir = join(configDir, 'data')
-  const hasLocal = existsSync(dataDir)
-
-  let store
-  let hub = null
-  let isOnline = false
-
-  // Load persisted auth token if available
-  const savedToken = overrides.token ?? readConfig(configDir, 'auth-token', null)
-
-  // Load shared realm cache (1h TTL)
-  // Note: actual pubkey matching happens after identity is resolved (below)
-  const REALM_CACHE_TTL_MS = 60 * 60 * 1000
-  const srCache = loadSharedRealms(configDir)
-  let sharedRealms = [] // populated after identity is resolved, if cache pubkey matches
-  const cacheExpired = srCache?.fetched_at
-    ? (Date.now() - new Date(srCache.fetched_at).getTime()) > REALM_CACHE_TTL_MS
-    : true
-
-  // Realm filter: uses mutable state, resolved after identity loads
-  const filterState = { pubkey: null, realms: sharedRealms, enabled: !overrides.skipRealmCheck }
-  const realmFilter = (obj) => {
-    if (!filterState.enabled || !filterState.pubkey) return true
-    return isVisible(obj, filterState.pubkey, filterState.realms)
-  }
-
-  // If realm is 'local', ensure data dir exists — local realm objects must never
-  // go through hub-only mode, which would bypass the sync store's push guard.
-  const effectiveRealm = overrides.realm || readConfig(configDir, 'default-realm', null)
-  if ((effectiveRealm === 'local' || effectiveRealm === 'server-public') && !hasLocal) {
-    mkdirSync(dataDir, { recursive: true })
-  }
-  const hasLocalResolved = hasLocal || effectiveRealm === 'local' || effectiveRealm === 'server-public'
-
-  if (hubUrl && hasLocalResolved) {
-    // Both: sync store (local primary, hub sync)
-    const local = createFsStore({ dataDir, filter: realmFilter })
-    hub = createHubStore({ url: hubUrl, token: savedToken })
-    store = createSyncStore({ local, remote: hub, sharedRealms, configDir })
-    isOnline = true
-  } else if (hubUrl) {
-    // Hub only (no local data dir yet)
-    hub = createHubStore({ url: hubUrl, token: savedToken })
-    store = hub
-    isOnline = true
-  } else if (hasLocalResolved) {
-    // Local only (offline mode)
-    store = createFsStore({ dataDir, filter: realmFilter })
-  } else {
-    // Nothing configured
-    die(
-      'No InstructionGraph configured.\n' +
-      'Run \'ig identity generate\' to get started.'
-    )
-  }
-
-  // Resolve identity: override or active
-  let identity
-  if (overrides.identityName) {
-    const pemPath = resolveIdentityPemPath(configDir, overrides.identityName)
-    if (!pemPath) die(`Identity not found: ${overrides.identityName}`)
-    identity = { type: 'pem-file', path: pemPath, name: overrides.identityName }
-  } else {
-    identity = resolveIdentityConfig(configDir)
-  }
-
-  const client = createClient({ store, identity, defaultRealm })
-  if (identity) await client.ready
-
-  // Activate realm filter now that identity is resolved
-  filterState.pubkey = client.pubkey
-  // Only use cached shared realms if they belong to the active identity
-  // AND the cache is still fresh (1h TTL).
-  if (srCache?.pubkey && srCache.pubkey === client.pubkey && !cacheExpired) {
-    sharedRealms = srCache.realms || []
-    filterState.realms = sharedRealms
-  }
-  // Update sync store's realm context for its own filtering
-  if (store.setRealmContext) {
-    store.setRealmContext(client.pubkey, sharedRealms)
-  }
-
-  // Auto-authenticate if requested (e.g. ig get --identity).
-  // This is the only safe time to refresh shared realms, because we know
-  // the token was minted for the active identity in this session.
-  if (overrides.authenticate && isOnline && hub) {
-    if (!client.signer) die('Cannot authenticate — no identity configured.')
-    const authResult = await client.authenticate()
-    if (!authResult.ok) die(`Authentication failed for identity: ${overrides.identityName || 'active'}`)
-    if (authResult.sharedRealms) {
-      sharedRealms = authResult.sharedRealms
-      filterState.realms = authResult.sharedRealms
-      if (store.setRealmContext) {
-        store.setRealmContext(client.pubkey, authResult.sharedRealms)
-      }
-    }
-  }
-
-  return { client, configDir, isOnline, hubUrl, hub, store }
-}
 
 // ─── Identity generation ─────────────────────────────────────────
 
@@ -925,6 +697,67 @@ function printStatus({ isOnline, hubUrl }) {
   }
 }
 
+// ─── git merge (owner-side, client-computed) ─────────────────────
+
+/**
+ * `ig git merge <fork-ref> [branch] [--into <upstream>] [--onto <refname>]
+ *                          [--ff-only|--no-ff] [--message M] [--identity N]`
+ * Run from a clone of the upstream repo (target branch checked out). Delegates
+ * the mechanics to src/git/merge.js; here we only resolve args + the local git.
+ */
+async function gitMerge() {
+  validateFlags('git merge', args.slice(2), {
+    booleanFlags: ['ff-only', 'no-ff'],
+    valueFlags: ['identity', 'into', 'onto', 'message'],
+  })
+  const pos = positionals(args.slice(2), ['identity', 'into', 'onto', 'message'])
+  if (!pos[0]) {
+    die('Usage: ig git merge <fork-ref> [branch] [--into <upstream>] [--onto <refname>] [--ff-only|--no-ff]')
+  }
+  const sourceRef = pos[0].replace(/^ig::/, '').split('/')[0]
+  const sourceBranch = pos[1] || undefined
+  const ffOnly = args.includes('--ff-only')
+  const noFF = args.includes('--no-ff')
+  if (ffOnly && noFF) die('--ff-only and --no-ff are mutually exclusive.')
+  const mode = ffOnly ? 'ff-only' : noFF ? 'no-ff' : 'auto'
+
+  const identityName = flag('identity')
+  const hasIdentity = !!resolveIdentityConfig(findConfigDir())
+  const ctx = await makeClient({ identityName, authenticate: hasIdentity })
+  if (!ctx.client.pubkey) die('No identity configured — run \'ig identity generate\' first.')
+
+  const { resolveGitDir } = await import('../src/git/gitio.js')
+  const { execFileSync } = await import('node:child_process')
+  let gitDir, worktree
+  try {
+    gitDir = resolveGitDir()
+    worktree = execFileSync('git', ['rev-parse', '--show-toplevel']).toString('utf-8').trim()
+  } catch {
+    die('ig git merge must run inside a git working tree (a clone of the upstream repo).')
+  }
+
+  const into = flag('into')
+  const { mergeIntoUpstream } = await import('../src/git/merge.js')
+  const result = await mergeIntoUpstream({
+    client: ctx.client, gitDir, worktree,
+    sourceRef, sourceBranch,
+    upstreamRef: into ? into.replace(/^ig::/, '').split('/')[0] : undefined,
+    targetRefname: flag('onto'),
+    mode, message: flag('message'),
+  })
+
+  if (result.kind === 'up-to-date') {
+    console.error(`Already up to date (${result.targetRef} at ${result.base}).`)
+    return
+  }
+  console.log(result.newTip)
+  console.error(
+    `Merged (${result.kind}) into ${result.upstreamRef}\n` +
+    `  ${result.targetRef}: ${result.base || '(empty)'} → ${result.newTip}\n` +
+    `  signed ${result.copied.length} owner-copy object(s) into your namespace`
+  )
+}
+
 // ─── Commands ────────────────────────────────────────────────────
 
 /** Commands that skip makeClient and status line. */
@@ -1265,6 +1098,87 @@ async function main() {
         await setRealm()
       } else {
         die('Usage: ig realm [set <realm|identity|dataverse001>]')
+      }
+      break
+    }
+
+    case 'git': {
+      const subcmd = args[1]
+      if (subcmd === 'init') {
+        validateFlags('git init', args.slice(2), { valueFlags: ['identity', 'realm', 'name'] })
+        const identityName = flag('identity')
+        const rawRealm = flag('realm')
+        const realm = await resolveRealmAlias(rawRealm, findConfigDir(), identityName)
+        const positional = args[2] && !args[2].startsWith('-') ? args[2] : null
+        const name = flag('name') || positional || 'repo'
+
+        const ctx = await makeClient({ identityName, realm })
+        if (!ctx.client.pubkey) die('No identity configured — run \'ig identity generate\' first.')
+
+        const { initRepo } = await import('../src/git/repo.js')
+        const id = crypto.randomUUID()
+        const ref = await initRepo({
+          client: ctx.client,
+          id,
+          name,
+          format: 'sha1',
+          in: realm ? [realm] : undefined,
+          defaultBranch: 'refs/heads/main',
+        })
+        console.log(ref)
+        console.error(
+          `Created GIT_REPOSITORY "${name}". Clone or push with:\n` +
+          `  git clone ig::${ref}/${name}\n` +
+          `  git remote add origin ig::${ref} && git push -u origin main`
+        )
+      } else if (subcmd === 'clone') {
+        validateFlags('git clone', args.slice(2), { valueFlags: ['identity'] })
+        const rawRef = args[2]
+        if (!rawRef) die('Usage: ig git clone <ref> [dir]')
+        const cleanRef = rawRef.replace(/^ig::/, '').split('/')[0]
+        const identityName = flag('identity')
+        const hasIdentity = !!resolveIdentityConfig(findConfigDir())
+        const ctx = await makeClient({ identityName, authenticate: hasIdentity })
+        const env = await ctx.client.get(cleanRef).catch(() => null)
+        const name = env?.item?.content?.name || cleanRef
+        const positional = args[3] && !args[3].startsWith('-') ? args[3] : null
+        const { spawnSync } = await import('node:child_process')
+        const cloneArgs = ['clone', `ig::${cleanRef}/${name}`]
+        if (positional) cloneArgs.push(positional)
+        const r = spawnSync('git', cloneArgs, { stdio: 'inherit' })
+        process.exit(r.status == null ? 1 : r.status)
+      } else if (subcmd === 'fork') {
+        validateFlags('git fork', args.slice(2), { valueFlags: ['identity', 'realm', 'name'] })
+        const [rawRef] = positionals(args.slice(2), ['identity', 'realm', 'name'])
+        if (!rawRef) die('Usage: ig git fork <upstream-ref> [--name N] [--realm R]')
+        const upstreamRef = rawRef.replace(/^ig::/, '').split('/')[0]
+        const identityName = flag('identity')
+        const realm = await resolveRealmAlias(flag('realm'), findConfigDir(), identityName)
+        // Reads may hit a private/shared upstream, so authenticate if we can.
+        const hasIdentity = !!resolveIdentityConfig(findConfigDir())
+        const ctx = await makeClient({ identityName, realm, authenticate: hasIdentity })
+        if (!ctx.client.pubkey) die('No identity configured — run \'ig identity generate\' first.')
+
+        const { forkRepo } = await import('../src/git/repo.js')
+        const { ref, tip, defaultBranch } = await forkRepo({
+          client: ctx.client,
+          upstreamRef,
+          name: flag('name'),
+          in: realm ? [realm] : undefined,
+        })
+        console.log(ref)
+        console.error(
+          `Forked ${upstreamRef}\n` +
+          `  ${defaultBranch} → ${tip || '(empty)'}\n` +
+          `Clone your fork, commit, and push:\n` +
+          `  git clone ig::${ref}\n` +
+          `  git push origin <branch>\n` +
+          `The upstream owner merges with: ig git merge ${ref} <branch>`
+        )
+      } else if (subcmd === 'merge') {
+        await gitMerge()
+      } else {
+        die('Usage: ig git [init [name] [--realm R] | clone <ref> [dir] | fork <upstream> | merge <fork> [branch]]')
       }
       break
     }
