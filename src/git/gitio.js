@@ -59,6 +59,20 @@ export function runGit(gitDir, args, { input, maxBuffer = 256 * 1024 * 1024 } = 
   })
 }
 
+/**
+ * Run a git command inside a working tree (cwd = worktree, git auto-discovers
+ * GIT_DIR + index). Use for operations that need a work tree/index — e.g.
+ * `git merge` — where the GIT_DIR-only `runGit` would refuse.
+ */
+export function runGitWorktree(worktree, args, { input, maxBuffer = 256 * 1024 * 1024 } = {}) {
+  return execFileSync('git', args, {
+    cwd: worktree,
+    env: { ...process.env, GIT_NO_REPLACE_OBJECTS: '1' },
+    input,
+    maxBuffer,
+  })
+}
+
 /** The repository's object format ('sha1' | 'sha256'). */
 export function objectFormat(gitDir) {
   return runGit(gitDir, ['rev-parse', '--show-object-format']).toString('utf-8').trim()
