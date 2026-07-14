@@ -24,6 +24,23 @@ export async function setupIgStore({ realm = 'server-public' } = {}) {
   return { dir, pubkey: id.pubkey, realm }
 }
 
+/**
+ * Add another identity to an existing store and return its pubkey. Lets tests
+ * model cross-identity flows (fork/merge) in one shared object store.
+ */
+export async function addIdentity(store, name) {
+  const id = await throwawayIdentity()
+  const idDir = join(store.dir, 'identities', name)
+  mkdirSync(idDir, { recursive: true })
+  writeFileSync(join(idDir, 'private.pem'), id.pem, { mode: 0o600 })
+  return id.pubkey
+}
+
+/** Switch the store's active identity (used by the git-remote-ig helper). */
+export function setActiveIdentity(store, name) {
+  writeFileSync(join(store.dir, 'config', 'active-identity'), `${name}\n`)
+}
+
 /** Write an executable `git-remote-ig` wrapper into a fresh dir; return the dir. */
 export function setupHelperOnPath() {
   const here = dirname(fileURLToPath(import.meta.url))
