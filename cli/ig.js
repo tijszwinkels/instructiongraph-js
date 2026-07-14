@@ -137,6 +137,8 @@ Commands:
   ig realm set <realm>                  Set a specific realm
   ig git init [name] [--realm R]        Create a git repository; prints its ref
   ig git clone <ref> [dir]              Clone a hosted repo (names dir after it)
+  ig git fork <upstream> [--name N]     Thin-fork a repo you can contribute to
+  ig git merge <fork> [branch]          Merge a fork branch into upstream (owner)
 
 Run 'ig <command> --help' for command-specific help.`)
   process.exit(0)
@@ -154,7 +156,7 @@ function commandUsage(command) {
     identity: `Usage: ig identity [generate|activate|list] [options]\n\nShow or manage the active identity.\n\nFlags:\n  --identity N  Show info for identity N instead of the active one\n\nSubcommands:\n  ig identity generate [--name N] [--project] [--activate]\n  ig identity activate <name>\n  ig identity list\n\nEnvironment:\n  INSTRUCTIONGRAPH_DIR  Override config directory location`,
     server: `Usage: ig server [set <url> | login | logout | remove | push]\n\nShow, configure, or remove the hub server connection.\n\nSubcommands:\n  ig server              Show current server status and auth\n  ig server set <url>    Connect to a hub server for sync\n  ig server login        Log in with your active identity\n  ig server logout       Log out from the hub\n  ig server remove       Disconnect and go offline\n  ig server push [--all]  Push local objects (default: your realms only)\n\nWithout a server, all data stays on local filesystem only.\nWith a server, objects sync between local storage and the hub.\nLogin uses your active identity (see ig identity).`,
     realm: `Usage: ig realm [set <realm|identity|dataverse001|server-public|local>]\n\nShow or set the default realm used for new objects.\n\n  ig realm set identity       Use current identity\'s realm (private)\n  ig realm set dataverse001   Use the public dataverse realm\n  ig realm set server-public  Public on this hub, not propagated globally\n  ig realm set local          Local only \u2014 never synced to any server\n  ig realm set <pubkey>       Use any specific realm`,
-    git: `Usage: ig git init [name] [--realm R] [--identity N]\n       ig git clone <ref> [dir] [--identity N]\n\nHost git repositories on instructionGraph (git-remote-ig helper).\n\ninit  Create a repository; prints its ref. Push/clone with:\n        git remote add origin ig::<ref> && git push -u origin main\n        git clone ig::<ref>/<name>\n      The /<name> suffix is ignored for resolution; it just gives stock git a\n      friendly checkout directory. Repo lives in your default realm unless\n      --realm is given. Only your identity can push; others fork to contribute.\n\nclone Clone a hosted repository, naming the checkout directory after the repo\n      (or [dir] if given).`,
+    git: `Usage: ig git init [name] [--realm R] [--identity N]\n       ig git clone <ref> [dir] [--identity N]\n       ig git fork <upstream-ref> [--name N] [--realm R] [--identity N]\n       ig git merge <fork-ref> [branch] [--into <upstream>] [--onto <refname>]\n                    [--ff-only | --no-ff] [--message M] [--identity N]\n\nHost git repositories on instructionGraph (git-remote-ig helper).\n\ninit  Create a repository; prints its ref. Push/clone with:\n        git remote add origin ig::<ref> && git push -u origin main\n        git clone ig::<ref>/<name>\n      The /<name> suffix is ignored for resolution; it just gives stock git a\n      friendly checkout directory. Repo lives in your default realm unless\n      --realm is given. Only your identity can push; others fork to contribute.\n\nclone Clone a hosted repository, naming the checkout directory after the repo\n      (or [dir] if given).\n\nfork  Thin-fork an upstream repo (O(1)): a new anchor with forked_from -> the\n      upstream plus a mirrored default branch, no objects copied. You own the\n      fork and can push to it; reads fall through to upstream. Inherits the\n      upstream realm unless --realm is given. Prints the fork ref.\n\nmerge Merge a fork branch back into an upstream you OWN (run from a clone of\n      the upstream, target branch checked out). Fetches the fork delta, runs\n      plain local git (fast-forward or, with --no-ff, a merge commit), signs\n      owner-copies of the new objects into your namespace (each carrying\n      copied_from -> the contributor's original), and CAS-updates the ref.\n      --into defaults to the fork's forked_from upstream; --onto to its\n      default branch. --ff-only refuses a non-fast-forward.`,
   }
 
   if (!docs[command]) die(`Unknown command: ${command}\nRun 'ig --help' for usage.`)
@@ -695,6 +697,67 @@ function printStatus({ isOnline, hubUrl }) {
   }
 }
 
+// ─── git merge (owner-side, client-computed) ─────────────────────
+
+/**
+ * `ig git merge <fork-ref> [branch] [--into <upstream>] [--onto <refname>]
+ *                          [--ff-only|--no-ff] [--message M] [--identity N]`
+ * Run from a clone of the upstream repo (target branch checked out). Delegates
+ * the mechanics to src/git/merge.js; here we only resolve args + the local git.
+ */
+async function gitMerge() {
+  validateFlags('git merge', args.slice(2), {
+    booleanFlags: ['ff-only', 'no-ff'],
+    valueFlags: ['identity', 'into', 'onto', 'message'],
+  })
+  const pos = positionals(args.slice(2), ['identity', 'into', 'onto', 'message'])
+  if (!pos[0]) {
+    die('Usage: ig git merge <fork-ref> [branch] [--into <upstream>] [--onto <refname>] [--ff-only|--no-ff]')
+  }
+  const sourceRef = pos[0].replace(/^ig::/, '').split('/')[0]
+  const sourceBranch = pos[1] || undefined
+  const ffOnly = args.includes('--ff-only')
+  const noFF = args.includes('--no-ff')
+  if (ffOnly && noFF) die('--ff-only and --no-ff are mutually exclusive.')
+  const mode = ffOnly ? 'ff-only' : noFF ? 'no-ff' : 'auto'
+
+  const identityName = flag('identity')
+  const hasIdentity = !!resolveIdentityConfig(findConfigDir())
+  const ctx = await makeClient({ identityName, authenticate: hasIdentity })
+  if (!ctx.client.pubkey) die('No identity configured — run \'ig identity generate\' first.')
+
+  const { resolveGitDir } = await import('../src/git/gitio.js')
+  const { execFileSync } = await import('node:child_process')
+  let gitDir, worktree
+  try {
+    gitDir = resolveGitDir()
+    worktree = execFileSync('git', ['rev-parse', '--show-toplevel']).toString('utf-8').trim()
+  } catch {
+    die('ig git merge must run inside a git working tree (a clone of the upstream repo).')
+  }
+
+  const into = flag('into')
+  const { mergeIntoUpstream } = await import('../src/git/merge.js')
+  const result = await mergeIntoUpstream({
+    client: ctx.client, gitDir, worktree,
+    sourceRef, sourceBranch,
+    upstreamRef: into ? into.replace(/^ig::/, '').split('/')[0] : undefined,
+    targetRefname: flag('onto'),
+    mode, message: flag('message'),
+  })
+
+  if (result.kind === 'up-to-date') {
+    console.error(`Already up to date (${result.targetRef} at ${result.base}).`)
+    return
+  }
+  console.log(result.newTip)
+  console.error(
+    `Merged (${result.kind}) into ${result.upstreamRef}\n` +
+    `  ${result.targetRef}: ${result.base || '(empty)'} → ${result.newTip}\n` +
+    `  signed ${result.copied.length} owner-copy object(s) into your namespace`
+  )
+}
+
 // ─── Commands ────────────────────────────────────────────────────
 
 /** Commands that skip makeClient and status line. */
@@ -1084,8 +1147,38 @@ async function main() {
         if (positional) cloneArgs.push(positional)
         const r = spawnSync('git', cloneArgs, { stdio: 'inherit' })
         process.exit(r.status == null ? 1 : r.status)
+      } else if (subcmd === 'fork') {
+        validateFlags('git fork', args.slice(2), { valueFlags: ['identity', 'realm', 'name'] })
+        const [rawRef] = positionals(args.slice(2), ['identity', 'realm', 'name'])
+        if (!rawRef) die('Usage: ig git fork <upstream-ref> [--name N] [--realm R]')
+        const upstreamRef = rawRef.replace(/^ig::/, '').split('/')[0]
+        const identityName = flag('identity')
+        const realm = await resolveRealmAlias(flag('realm'), findConfigDir(), identityName)
+        // Reads may hit a private/shared upstream, so authenticate if we can.
+        const hasIdentity = !!resolveIdentityConfig(findConfigDir())
+        const ctx = await makeClient({ identityName, realm, authenticate: hasIdentity })
+        if (!ctx.client.pubkey) die('No identity configured — run \'ig identity generate\' first.')
+
+        const { forkRepo } = await import('../src/git/repo.js')
+        const { ref, tip, defaultBranch } = await forkRepo({
+          client: ctx.client,
+          upstreamRef,
+          name: flag('name'),
+          in: realm ? [realm] : undefined,
+        })
+        console.log(ref)
+        console.error(
+          `Forked ${upstreamRef}\n` +
+          `  ${defaultBranch} → ${tip || '(empty)'}\n` +
+          `Clone your fork, commit, and push:\n` +
+          `  git clone ig::${ref}\n` +
+          `  git push origin <branch>\n` +
+          `The upstream owner merges with: ig git merge ${ref} <branch>`
+        )
+      } else if (subcmd === 'merge') {
+        await gitMerge()
       } else {
-        die('Usage: ig git [init [name] [--realm R] | clone <ref> [dir]]')
+        die('Usage: ig git [init [name] [--realm R] | clone <ref> [dir] | fork <upstream> | merge <fork> [branch]]')
       }
       break
     }
