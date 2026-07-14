@@ -9,7 +9,8 @@
 
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { mkdtempSync, rmSync } from 'node:fs'
+import { execFileSync } from 'node:child_process'
+import { mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
@@ -18,6 +19,7 @@ import { createFsStore } from '../src/store/fs.js'
 import { buildFixtureRepo } from '../test-support/git-fixture.js'
 import { throwawayIdentity } from '../test-support/throwaway-identity.js'
 import { initRepo, openRepo, forkRepo } from '../src/git/repo.js'
+import { pushToRemote } from '../src/git/transfer.js'
 import { objRef } from '../src/git/addressing.js'
 
 async function twoParty() {
@@ -103,6 +105,62 @@ test('fork prefers its own object over the upstream copy at the same oid', async
   assert.ok(localAddr.startsWith(bobClient.pubkey + '.'))
   assert.ok((await bobClient.get(localAddr)).item, 'fork stored its own copy')
 
+  rmSync(dataDir, { recursive: true, force: true })
+})
+
+test('fork delta relations resolve across the graft point (no dangling sugar)', async () => {
+  // Generic graph-walkers (the web viewer) follow `relations`; on a thin fork a
+  // delta object's parent/tree/entry must point at the namespace where the
+  // referenced object actually lives — fork-local for the delta, upstream for
+  // objects it inherited — not blindly at the fork namespace.
+  const { dataDir, aliceClient, bobClient } = await twoParty()
+  const up = mkdtempSync(join(tmpdir(), 'ig-fork-rel-'))
+  const G = {
+    ...process.env, GIT_CONFIG_GLOBAL: '/dev/null', GIT_CONFIG_SYSTEM: '/dev/null',
+    GIT_AUTHOR_NAME: 'A', GIT_AUTHOR_EMAIL: 'a@e', GIT_AUTHOR_DATE: '1700000000 +0000',
+    GIT_COMMITTER_NAME: 'A', GIT_COMMITTER_EMAIL: 'a@e', GIT_COMMITTER_DATE: '1700000000 +0000',
+  }
+  const g = (args) => execFileSync('git', ['-C', up, ...args], { env: G }).toString('utf-8')
+  g(['init', '-q', '-b', 'main'])
+  writeFileSync(join(up, 'a.txt'), 'aaa\n'); writeFileSync(join(up, 'b.txt'), 'bbb\n')
+  g(['add', '-A']); g(['commit', '-q', '-m', 'c1'])
+
+  const upstreamRef = await initRepo({ client: aliceClient, id: crypto.randomUUID(), name: 'up', in: ['server-public'], defaultBranch: 'refs/heads/main' })
+  const upstream = await openRepo({ client: aliceClient, repoRef: upstreamRef })
+  await pushToRemote({ repo: upstream, gitDir: join(up, '.git'), pushes: [{ src: 'refs/heads/main', dst: 'refs/heads/main', force: false }] })
+
+  const { ref: forkRef } = await forkRepo({ client: bobClient, upstreamRef })
+  const fork = await openRepo({ client: bobClient, repoRef: forkRef })
+
+  // change ONLY a.txt → new commit + new root tree + new a.txt blob; b.txt's
+  // blob is inherited (lives upstream, not in the fork).
+  g(['checkout', '-q', '-b', 'feature'])
+  writeFileSync(join(up, 'a.txt'), 'aaa2\n'); g(['add', '-A']); g(['commit', '-q', '-m', 'c2'])
+  const c2 = g(['rev-parse', 'HEAD']).trim()
+  await pushToRemote({ repo: fork, gitDir: join(up, '.git'), pushes: [{ src: 'refs/heads/feature', dst: 'refs/heads/feature', force: false }] })
+
+  const c2obj = (await bobClient.get(await objRef(fork.owner, fork.repoId, c2))).item
+
+  // parent → the upstream namespace, and it resolves (would be a 404 in the fork ns)
+  const parentRef = c2obj.relations.parent[0].ref
+  assert.ok((await bobClient.get(parentRef))?.item, 'parent relation must resolve')
+  assert.ok(parentRef.startsWith(aliceClient.pubkey + '.'), 'parent points at the upstream owner namespace')
+
+  // tree → the new (fork-local) root tree, resolves
+  const treeRef = c2obj.relations.tree[0].ref
+  assert.ok(treeRef.startsWith(bobClient.pubkey + '.'), 'new root tree is fork-local')
+  const treeObj = (await bobClient.get(treeRef)).item
+
+  // every entry resolves: a.txt (changed → fork-local), b.txt (unchanged → upstream)
+  for (const e of treeObj.relations.entry) {
+    const owner = e.ref.startsWith(bobClient.pubkey + '.') ? 'fork' : 'upstream'
+    assert.ok((await bobClient.get(e.ref))?.item, `entry ${e.name} (${owner}) must resolve`)
+  }
+  const byName = Object.fromEntries(treeObj.relations.entry.map(e => [e.name, e.ref]))
+  assert.ok(byName['a.txt'].startsWith(bobClient.pubkey + '.'), 'changed blob is fork-local')
+  assert.ok(byName['b.txt'].startsWith(aliceClient.pubkey + '.'), 'inherited blob points upstream')
+
+  rmSync(up, { recursive: true, force: true })
   rmSync(dataDir, { recursive: true, force: true })
 })
 

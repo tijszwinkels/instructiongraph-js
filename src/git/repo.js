@@ -14,7 +14,7 @@ import { parseRef, makeRef } from '../object.js'
 import { ROOT_REF } from '../identity.js'
 import { payloadToContent, contentToPayload } from './codec.js'
 import { computeOid } from './oid.js'
-import { objId, objRef, refId } from './addressing.js'
+import { objId, refId } from './addressing.js'
 import { encodeRefContent, decodeRefContent } from './ref.js'
 import { TYPE_REFS, OTYPE_TO_TYPE, OTYPE_INSTRUCTION, REF_INSTRUCTION, repoInstruction } from './typerefs.js'
 
@@ -134,6 +134,22 @@ export async function openRepo({ client, repoRef, _seen = new Set() }) {
     return _parents
   }
 
+  // Address of a git object as *referenced from this repo's objects*. A plain
+  // repo just uses the local computed address (no lookups). On a thin fork a
+  // referenced object may live upstream (inherited, not part of the delta) —
+  // point the relation where the object actually resolves, so generic
+  // graph-walkers don't 404 at the graft point. Objects not found anywhere on
+  // the chain yet are part of this same push (or absent) → default to local.
+  // Cached per open; only forks pay the lookup.
+  const _refAddrCache = new Map()
+  async function refAddr(oid) {
+    if (!forkedFrom.length) return makeRef(owner, await objId(repoId, oid))
+    if (_refAddrCache.has(oid)) return _refAddrCache.get(oid)
+    const addr = (await api.addrOf(oid)) || makeRef(owner, await objId(repoId, oid))
+    _refAddrCache.set(oid, addr)
+    return addr
+  }
+
   // Child addresses are computed in the OWNER's namespace, but client.create
   // signs and addresses objects under the ACTIVE identity. They only coincide
   // when the active identity IS the owner — which the single-owner-push model
@@ -156,23 +172,23 @@ export async function openRepo({ client, repoRef, _seen = new Set() }) {
       type_def: [{ ref: TYPE_REFS[OTYPE_TO_TYPE[otype]] }],
     }
     if (otype === 'commit' && content.commit) {
-      if (content.commit.tree) relations.tree = [{ ref: await objRef(owner, repoId, content.commit.tree) }]
+      if (content.commit.tree) relations.tree = [{ ref: await refAddr(content.commit.tree) }]
       if (content.commit.parents?.length) {
         relations.parent = await Promise.all(
-          content.commit.parents.map(async p => ({ ref: await objRef(owner, repoId, p) }))
+          content.commit.parents.map(async p => ({ ref: await refAddr(p) }))
         )
       }
     } else if (otype === 'tree' && content.entries) {
       // Skip gitlink (160000) entries: those oids live in a submodule repo,
-      // not this namespace, so an objRef here would be wrong.
+      // not this namespace, so a ref here would be wrong.
       const linkable = content.entries.filter(e => e.mode !== '160000')
       if (linkable.length) {
         relations.entry = await Promise.all(
-          linkable.map(async e => ({ ref: await objRef(owner, repoId, e.oid), name: e.name }))
+          linkable.map(async e => ({ ref: await refAddr(e.oid), name: e.name }))
         )
       }
     } else if (otype === 'tag' && content.tag?.object) {
-      relations.target = [{ ref: await objRef(owner, repoId, content.tag.object) }]
+      relations.target = [{ ref: await refAddr(content.tag.object) }]
     }
     return relations
   }
@@ -224,6 +240,21 @@ export async function openRepo({ client, repoRef, _seen = new Set() }) {
       const addr = makeRef(owner, await objId(repoId, oid))
       const e = await client.get(addr)
       return !!(e?.item && e.item.type !== 'DELETED')
+    },
+
+    /**
+     * The address where `oid` resolves in this repo's fork graph: this
+     * namespace if stored here, else the first ancestor (depth-first) that has
+     * it; null if nowhere on the chain stores it. Lets relation sugar point at
+     * the live object instead of dangling at the graft point.
+     */
+    async addrOf(oid) {
+      if (await api.hasObjectLocal(oid)) return makeRef(owner, await objId(repoId, oid))
+      for (const p of await parents()) {
+        const a = await p.addrOf(oid)
+        if (a) return a
+      }
+      return null
     },
 
     /**
@@ -320,7 +351,7 @@ export async function openRepo({ client, repoRef, _seen = new Set() }) {
         repository: [{ ref: repoRef }],
         type_def: [{ ref: TYPE_REFS.GIT_REF }],
       }
-      if (targetOid) relations.target = [{ ref: await objRef(owner, repoId, targetOid) }]
+      if (targetOid) relations.target = [{ ref: await refAddr(targetOid) }]
 
       await client.create({
         type: 'GIT_REF', id, in: realms, content, relations,

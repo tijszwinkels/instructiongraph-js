@@ -19,16 +19,23 @@ order, cycle-guarded), the O(1) fork anchor, and the merge provenance. Evidence:
 `test/git-fork.test.js` (fallthrough) and the thin-fork assertion in
 `test/git-fork-merge-e2e.test.js` (fork stores C2 but not C1).
 
-## 2. Relation sugar on fork delta-objects may dangle (memo-sanctioned)
+## 2. Relation sugar on fork delta-objects resolves across the graft point (tightened)
 
-A fork's delta commit/tree carries `parent`/`tree`/`entry` relations computed in the
-**fork's** namespace, even when the target actually lives upstream (structural
-sharing). Those sugar links 404 on a naive follow. This is exactly the memo's
-"parsed mirrors / relation sugar are derived, never authoritative; may dangle after
-fork GC" stance (§2, README decision 3). The authoritative mechanism is the
-address-computed resolver (§1), which re-hashes every payload — so correctness never
-depends on the sugar. Left as-is by design; not worth an extra `hasObject` probe per
-relation at write time.
+A fork's delta commit/tree references objects that may live either in the fork (the
+delta) or upstream (inherited via structural sharing). The memo sanctioned letting the
+`parent`/`tree`/`entry` sugar dangle at the graft point ("parsed mirrors / relation
+sugar are derived, never authoritative"). In practice that broke *"generic dataverse
+viewers walk history without git knowledge"* (README decision 3): the web viewer
+follows `relations` blindly and 404s at the fork boundary. So we tightened it (Tijs hit
+it on first fork, 2026-07-14): `objectRelations` and the GIT_REF `target` now route
+every referenced oid through `refAddr` → `openRepo().addrOf(oid)`, which points the
+relation at the namespace where the object actually resolves (fork-local for the delta,
+the first ancestor that stores it otherwise; falls back to local for same-push/absent
+oids). **Non-fork repos keep the previous zero-lookup fast path** (`forkedFrom.length`
+gate), so normal pushes are unaffected; only forks pay the classification reads
+(cached per open). Because git objects are immutable by oid, this fixes *future* fork
+pushes — objects written before the fix keep their original relations. Covered by
+`test/git-fork.test.js` ("fork delta relations resolve across the graft point").
 
 ## 3. `ig git merge` runs from the owner's working clone (matches "plain local git")
 
