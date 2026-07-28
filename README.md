@@ -99,6 +99,11 @@ ig realm set dataverse001        # Public realm
 ig realm set identity            # Private realm
 ig realm set <realm>             # Custom realm
 ig git init [name] [--realm R]   # Create a git repository (prints its ref)
+ig freenet publish <ref>         # Publish to Freenet, poke targets' indexes
+ig freenet get <ref> [--rev N]   # Read a head, or one immutable revision
+ig freenet inbound <ref>         # Who points at this object (index slot map)
+ig freenet verify <ref>          # Check index slots against their snapshots
+ig freenet derive <ref>          # Print derived contract ids (contacts nothing)
 ```
 
 ## Git hosting (`git clone ig::…`)
@@ -154,6 +159,76 @@ works offline too.
   incomplete). Fetch trusts the local object store's connectivity, exactly as
   git's own transports do.
 
+## Freenet backend (`ig freenet`)
+
+Publish signed objects to [Freenet](https://freenet.org) and read them back,
+including an **inbound-relations index** — the answer to "who points at this
+object?", stored on the network rather than in a server-side database.
+
+Every contract is addressed from the object's ref alone, so there is no index
+to consult and nothing to look up:
+
+| contract | holds | address |
+|---|---|---|
+| head | the current envelope | `params32`, mutable, last-writer-wins on revision |
+| snapshot | one immutable revision | `params40`, one contract per `(ref, revision)` |
+| index | who points at this object | `params32` **of the target** |
+
+```
+params32    = BLAKE3(pubkey_raw_33B)[..16] ‖ uuid_16B
+params40    = params32 ‖ revision_be64
+contract_id = base58( BLAKE3( BLAKE3(wasm_bytes) ‖ params ) )
+```
+
+The contract WASM hashes into the id, which is what keeps the three keyspaces
+apart even though all three are derived from the same ref.
+
+```bash
+# One-time setup: the node's port and the pinned contract WASMs.
+ig freenet config freenet-contracts-dir /path/to/contracts
+ig freenet config freenet-port 7509
+
+ig freenet publish <ref>          # or a path to a signed envelope JSON
+ig freenet inbound <ref> | jq .   # {"<source-ref>": {"revision": 3, "relations": ["root"]}}
+ig freenet verify <ref>           # exit 0 iff every slot verifies
+ig freenet derive <ref> --rev 3   # debug addressing without touching the node
+```
+
+`publish` runs an ordered flow: snapshot PUT → a **GET-back gate** → head PUT →
+one poke per distinct target in `item.relations`. The gate matters: a poke makes
+the target's index fetch the source's snapshot, so poking before that snapshot
+is confirmed stalls every poke for the node's multi-minute fetch budget and then
+fails. If the snapshot is not confirmed, nothing is poked at all.
+
+Everything is idempotent — the snapshot re-PUT is a no-op, the head merge is
+LWW, and pokes are LWW — so a partial run is fixed by running it again. Pokes
+are independent; `publish` reports each target and exits non-zero if any failed.
+
+Notes and limits:
+
+- **The contract WASMs are pinned artifacts, never rebuilt on the fly.** Their
+  bytes define the keyspace: a rebuilt contract addresses a different, empty
+  universe, and every existing object then reads as unpublished rather than as
+  an error. Hence a configured directory rather than a build step.
+- `ig freenet get --rev N` never falls back to the head. The absence of a
+  revision is meaningful; answering with a different revision would be worse
+  than answering nothing.
+- `inbound` distinguishes "no index exists" (exit 1 — nothing has ever poked
+  this target) from "an index with no slots" (exit 0, `{}`).
+- **The index is a filter, not proof.** The contract's creation and seeding
+  paths accept structure-only states, so a slot is a claim until checked — that
+  is what `ig freenet verify` is for. It re-derives each slot from the source's
+  own signed snapshot and reports `verified-current`, `verified-stale` (the
+  source moved on, or its head is not on the node so currency is unknowable) or
+  `unverified`.
+- Node calls go through `fdev`, and every one is bounded (`--timeout`,
+  `--put-timeout`). An unbounded GET for a contract the node does not hold
+  blocks for minutes, which reads as a hung terminal.
+- BLAKE3 and base58 are vendored in `src/freenet/` rather than taken as
+  dependencies, so the package keeps zero runtime dependencies. They are
+  verified against the official BLAKE3 test vectors and against live contract
+  ids; signing itself is untouched and stays on Web Crypto.
+
 ## Architecture
 
 ```
@@ -169,9 +244,20 @@ src/
     hub.js          # createHubStore — HTTP hub backend
     fs.js           # createFsStore — filesystem (Node only)
     sync.js         # createSyncStore — local + remote sync
+  freenet/
+    blake3.js       # BLAKE3-256 (vendored; addressing only)
+    base58.js       # base58 encode/decode (vendored)
+    addressing.js   # ref → head / snapshot / index contract ids
+    contracts.js    # read + hash the pinned contract WASMs
+    config.js       # port, fdev path, contracts dir
+    fdev.js         # createFdevNode — bounded fdev subprocess client
+    relations.js    # one reading of an envelope's relations, shared
+    publish.js      # US-3.1 ordered publish + poke flow
+    verify.js       # US-3.4 slot verification
   index.js          # public re-exports
 cli/
   ig.js             # CLI entry point
+  freenet.js        # `ig freenet` command family
 ```
 
 ## Store Interface
@@ -229,6 +315,24 @@ const store = createSyncStore({ local: fsStore, remote: hubStore })
 ```bash
 node --test test/
 ```
+
+The Freenet end-to-end suite is skipped unless you opt in, since it needs the
+pinned contract WASMs and a node of your own:
+
+```bash
+export IG_FREENET_E2E_CONTRACTS=/path/to/contracts   # golden-id checks, offline
+
+freenet local --ws-api-address 127.0.0.1 --ws-api-port 7511 \
+  --config-dir ~/.cache/ig-freenet-e2e/config \
+  --data-dir   ~/.cache/ig-freenet-e2e/data
+export IG_FREENET_E2E_PORT=7511                      # + the live flow
+
+node --test test/freenet-e2e.test.js
+```
+
+Use a **local-mode node of your own**, never a shared or network node. Every
+other Freenet test runs offline against a fake `fdev`
+(`test-support/fake-fdev.js`).
 
 ## Cross-compatibility
 
