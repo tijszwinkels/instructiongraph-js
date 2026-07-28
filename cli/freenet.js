@@ -251,12 +251,18 @@ async function cmdPublish(positional, flags) {
       ? `   ✓ ${poke.target}${poke.created ? '  (index created)' : ''}`
       : `   ✗ ${poke.target}  ${poke.error.split('\n').join(' ')}`)
   }
-  if (report.failed > 0) {
-    throw new Error(
-      `${report.failed} of ${report.pokes.length} poke(s) failed — re-run 'ig freenet publish ${ref}' to retry.\n` +
-      '  The flow is idempotent: the snapshot re-PUT is a no-op, the head merge is LWW, and pokes are LWW.',
-    )
-  }
+  if (report.ok) return
+
+  // Exit non-zero for EITHER failure mode. A green poke report over a head
+  // that never landed would tell the user their object is live when it isn't.
+  const reasons = []
+  if (!report.headState.confirmed) reasons.push(`the head was not confirmed — ${report.headState.detail}`)
+  if (report.failed > 0) reasons.push(`${report.failed} of ${report.pokes.length} poke(s) failed`)
+  throw new Error(
+    `${reasons.join('\n  ')}\n` +
+    `  Re-run 'ig freenet publish ${ref}' to retry — the flow is idempotent: the snapshot\n` +
+    '  re-PUT is a no-op, the head merge is LWW, and pokes are LWW.',
+  )
 }
 
 function cmdConfig(positional) {

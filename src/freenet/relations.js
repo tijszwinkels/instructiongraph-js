@@ -8,6 +8,8 @@
  * share this module rather than each doing their own walk.
  */
 
+import { canonicalRef } from './addressing.js'
+
 /**
  * Every distinct target ref in `item.relations`, sorted.
  *
@@ -34,23 +36,46 @@ export function relationTargets(envelope) {
 }
 
 /**
- * The relation names under which an envelope points at one target — sorted
- * and unique, which is exactly the shape a verified index slot carries (D2).
+ * D2 slot bounds. These are the contract's own deterministic filters — every
+ * peer must drop exactly the same entries for the merged state to converge —
+ * so a verifier that does not apply them computes an expectation the contract
+ * could never have written, and reports honest slots as door-2 artifacts.
+ */
+const MAX_RELATION_NAME = 128
+const MAX_RELATIONS_PER_SLOT = 64
+
+/**
+ * The relation names under which an envelope points at one target — sorted,
+ * unique, and filtered exactly as the index contract filters them, which is
+ * the shape a verified index slot carries (D2).
  *
  * @param {object} envelope
- * @param {string} target
+ * @param {string} target - compared canonically; see canonicalRef
  * @returns {string[]}
  */
 export function relationNamesTargeting(envelope, target) {
   const relations = envelope?.item?.relations
+  const wanted = canonicalOrNull(target)
   const names = new Set()
   if (relations && typeof relations === 'object') {
     for (const [name, entries] of Object.entries(relations)) {
       if (!Array.isArray(entries)) continue
-      if (entries.some(e => e && e.ref === target)) names.add(name)
+      if (!name || name.length > MAX_RELATION_NAME) continue
+      if (entries.some(e => e && typeof e.ref === 'string' && canonicalOrNull(e.ref) === wanted)) {
+        names.add(name)
+      }
     }
   }
-  return [...names].sort()
+  return [...names].sort().slice(0, MAX_RELATIONS_PER_SLOT)
+}
+
+/** Canonical form of a ref, or the raw string when it cannot be parsed. */
+function canonicalOrNull(ref) {
+  try {
+    return canonicalRef(ref)
+  } catch {
+    return ref
+  }
 }
 
 /** An envelope's ref. */

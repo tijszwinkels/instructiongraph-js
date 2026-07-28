@@ -39,6 +39,19 @@ const seconds = (ms) => `${Math.round(ms / 1000)}s`
  * and a SIGKILL carries none. The process-level bound is then set ABOVE it as
  * a pure backstop for an fdev that ignores its own deadline.
  */
+/**
+ * How fdev words the two outcomes that must never be confused (captured from
+ * fdev 0.3.274, 2026-07-28):
+ *
+ *   absent      "client error: missing contract: <id>"
+ *   unreachable "failed to connect to the host(ws://…): IO error: Connection refused"
+ *
+ * Treating an unreachable node as "absent" is the dangerous direction: the
+ * publish flow would conclude no index exists and start creating them.
+ */
+const ABSENT_RE = /missing contract|contract not found|not found/i
+const UNREACHABLE_RE = /failed to connect to the host|connection refused|connection reset|no route to host|broken pipe/i
+
 const FDEV_TIMEOUT_GRACE_MS = 10_000
 const fdevTimeoutArgs = (ms) => ['--timeout', String(Math.max(1, Math.ceil(ms / 1000)))]
 const processBound = (ms) => ms + FDEV_TIMEOUT_GRACE_MS
@@ -53,7 +66,10 @@ function defaultExec(file, args, { timeoutMs }) {
       file, args,
       { timeout: timeoutMs, killSignal: 'SIGKILL', maxBuffer: 64 * 1024 * 1024 },
       (err, stdout, stderr) => {
-        if (err && err.code === 'ENOENT') {
+        // execFile reports a failed SPAWN with a string code (ENOENT, EACCES,
+        // EPERM, …) and a non-zero EXIT with a number. Keying on ENOENT alone
+        // would let an unexecutable fdev fall through as a contract miss.
+        if (err && typeof err.code === 'string' && !err.killed) {
           return resolve({ code: null, stdout: '', stderr: '', timedOut: false, spawnError: err })
         }
         resolve({
@@ -175,10 +191,30 @@ export function createFdevNode({
       } catch { /* no output file — a miss */ }
 
       if (res.code !== 0 || !raw) {
+        const stderr = `${res.stderr}\n${res.stdout}`
+        // An unreachable node must never read as "this contract is absent" —
+        // the publish flow would take that as licence to create indexes.
+        if (UNREACHABLE_RE.test(stderr)) {
+          throw new Error(
+            `Could not reach a Freenet node on 127.0.0.1:${port}.\n` +
+            `  ${tail(stderr, 3)}\n` +
+            `  Check the node is running and listening on port ${port}, or set a different one:\n` +
+            `    ig freenet config ${FREENET_CONFIG_KEYS.port} <port>`,
+          )
+        }
+        // Only an explicit absence counts as absence. Anything else is an
+        // operational failure and is surfaced rather than silently swallowed.
+        if (res.code !== 0 && !ABSENT_RE.test(stderr)) {
+          throw new Error(
+            `fdev GET of ${id} failed (exit ${res.code}) on 127.0.0.1:${port}:\n` +
+            tail(stderr, 5).split('\n').map(l => `  ${l}`).join('\n'),
+          )
+        }
         return {
           found: false,
           state: null,
           timedOut: false,
+          operational: false,
           detail: `no state returned for ${id} — not found on the node` +
             (res.code !== 0 && tail(res.stderr, 3) ? `\n  ${tail(res.stderr, 3)}` : ''),
         }

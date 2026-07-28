@@ -119,7 +119,7 @@ test('loadContracts reports a missing contracts directory distinctly', () => {
 // ─── fdev argv ───────────────────────────────────────────────────
 
 test('get issues `fdev -p PORT execute get <id> --output <file> --timeout <s>`', async () => {
-  const { exec, calls } = fakeExec([{ code: 1 }])
+  const { exec, calls } = fakeExec([{ code: 1, stderr: 'client error: missing contract: ID' }])
   const n = createFdevNode({ fdevPath: '/opt/fdev', port: 7511, exec, timeoutMs: 30_000 })
   await n.get('SOMECONTRACTID')
   assert.equal(calls[0].file, '/opt/fdev')
@@ -131,7 +131,7 @@ test('get issues `fdev -p PORT execute get <id> --output <file> --timeout <s>`',
 test('fdev gets its own --timeout, and the process bound sits above it', async () => {
   // fdev can give up cleanly and explain itself; SIGKILL cannot. So fdev's
   // deadline must fire FIRST, with the process kill only as a hard backstop.
-  const { exec, calls } = fakeExec([{ code: 1 }])
+  const { exec, calls } = fakeExec([{ code: 1, stderr: 'client error: missing contract: ID' }])
   const n = createFdevNode({ fdevPath: 'fdev', port: 7509, exec, timeoutMs: 20_000 })
   await n.get('ID')
   const fdevTimeoutS = Number(calls[0].args[calls[0].args.indexOf('--timeout') + 1])
@@ -263,9 +263,57 @@ test('the DEV-2 probe uses its own short timeout, not the read timeout', async (
   // DEV-2: a locally hosted contract answers in well under a second, so 5 s
   // separates "already here" from "would go to the network" without ever
   // waiting out the node's fetch budget. It must not inherit --timeout.
-  const { exec, calls } = fakeExec([{ code: 1 }])
+  const { exec, calls } = fakeExec([{ code: 1, stderr: 'client error: missing contract: ID' }])
   const n = createFdevNode({ fdevPath: 'fdev', port: 7509, exec, timeoutMs: 60_000, probeTimeoutMs: 5_000 })
   await n.probe('ID')
   assert.equal(calls[0].args[calls[0].args.indexOf('--timeout') + 1], '5')
   assert.ok(calls[0].opts.timeoutMs < 60_000, 'process bound stays near the probe bound')
+})
+
+// ─── operational failure vs genuine absence ──────────────────────
+
+test('a non-ENOENT spawn failure (e.g. EACCES) is still a spawn failure', async () => {
+  // execFile reports spawn problems with a STRING code and exit failures with
+  // a number; anything non-numeric must not fall through as a contract miss.
+  const { exec } = fakeExec([{ spawnError: Object.assign(new Error('permission denied'), { code: 'EACCES' }) }])
+  const n = createFdevNode({ fdevPath: '/root/fdev', port: 7509, exec })
+  await assert.rejects(() => n.get('ID'), (err) => {
+    assert.match(err.message, /\/root\/fdev/)
+    assert.doesNotMatch(err.message, /not found on the node/i)
+    return true
+  })
+})
+
+test('an unreachable node is an error, not "contract not found"', async () => {
+  // fdev's real wording, captured from the binary on 2026-07-28.
+  const { exec } = fakeExec([{
+    code: 1,
+    stderr: 'Error: failed to connect to the host(ws://127.0.0.1:7599/v1/contract/command): IO error: Connection refused (os error 111)',
+  }])
+  const n = createFdevNode({ fdevPath: 'fdev', port: 7599, exec })
+  await assert.rejects(() => n.get('ID'), (err) => {
+    assert.match(err.message, /could not reach|connect/i)
+    assert.match(err.message, /7599/, 'names the port, the usual cause')
+    return true
+  })
+})
+
+test('a genuine miss is reported as a miss, not an error', async () => {
+  const { exec } = fakeExec([{ code: 1, stderr: 'Error: Failed to receive response: client error: missing contract: ABC' }])
+  const res = await createFdevNode({ fdevPath: 'fdev', port: 7509, exec }).get('ABC')
+  assert.equal(res.found, false)
+  assert.equal(res.operational, false)
+  assert.match(res.detail, /not found/i)
+})
+
+test('an unrecognised failure is surfaced, never silently treated as absence', async () => {
+  const { exec } = fakeExec([{ code: 3, stderr: 'Error: something nobody predicted' }])
+  const n = createFdevNode({ fdevPath: 'fdev', port: 7509, exec })
+  await assert.rejects(() => n.get('ID'), /something nobody predicted/)
+})
+
+test('a probe treats an unreachable node as an error, so DEV-2 cannot mass-create indexes', async () => {
+  const { exec } = fakeExec([{ code: 1, stderr: 'Error: failed to connect to the host(ws://x): Connection refused' }])
+  const n = createFdevNode({ fdevPath: 'fdev', port: 7509, exec })
+  await assert.rejects(() => n.probe('ID'), /could not reach|connect/i)
 })

@@ -72,6 +72,22 @@ function uuidBytes(uuid) {
 }
 
 /**
+ * A ref in the one form two refs must share to be "the same object".
+ *
+ * Addressing is uuid-case-insensitive (the uuid is hashed as bytes), so
+ * `…-000001` and `…-000001` in different cases reach the SAME contract. Any
+ * comparison of refs as strings has to agree with that, or a ref typed in
+ * uppercase would address the right index and then match none of its slots.
+ *
+ * @param {string} ref
+ * @returns {string}
+ */
+export function canonicalRef(ref) {
+  const { pubkey, uuid } = parseRef(ref)
+  return `${pubkey}.${uuid.toLowerCase()}`
+}
+
+/**
  * The object's 32-byte params — the address of a head or an inbound index.
  * @param {string} ref
  * @returns {Uint8Array} 32 bytes

@@ -57,6 +57,38 @@ async function pokeTarget({ target, sourceRef, revision, node, addressing, contr
 }
 
 /**
+ * Relation targets of the head we are about to replace, so targets dropped in
+ * this revision can still be poked (US-2.4).
+ *
+ * Only a head STRICTLY OLDER than ours is a predecessor. An equal-or-newer
+ * head is either our own re-publish or someone else's state; diffing against
+ * it would poke targets we never dropped.
+ *
+ * @returns {Promise<string[]>}
+ */
+async function previousTargets({ headId, revision, node, log }) {
+  let previous
+  try {
+    previous = await node.probe(headId)
+  } catch (err) {
+    // An unreachable node is about to fail the head PUT anyway; don't fail
+    // here, where the only cost is losing tombstones.
+    log(`   (could not read the previous head: ${err.message.split('\n')[0]})`)
+    return []
+  }
+  if (!previous.found) return []
+
+  let previousRevision
+  try {
+    previousRevision = envelopeRevision(previous.state)
+  } catch {
+    return []
+  }
+  if (previousRevision >= revision) return []
+  return relationTargets(previous.state)
+}
+
+/**
  * @param {object} opts
  * @param {object} opts.envelope - the signed object to publish
  * @param {object} opts.node - fdev node client
@@ -110,6 +142,18 @@ export async function publishObject({ envelope, node, addressing, contracts, log
   }
   log('   confirmed: the node holds our signature')
 
+  // ── 2b. read the previous head, before we overwrite it ─────────
+  // US-2.4: when a revision DROPS a relation, the target's index only learns
+  // about it if we poke that target too — the index fetches our new snapshot,
+  // finds no relation to itself, and writes {revision: N+1, relations: []}.
+  // Without this the removal never propagates and the index stays wrong.
+  //
+  // Bounded like the DEV-2 probe, and for the same reason: on a first publish
+  // there is no previous head, and an unbounded miss would block for the
+  // node's fetch budget. A miss simply means no tombstones — the head we
+  // cannot read is one we cannot diff against.
+  const droppedTargets = await previousTargets({ headId, revision, node, log })
+
   // ── 3. head PUT ────────────────────────────────────────────────
   log(`── 3/4 head PUT       ${headId}`)
   await node.publish({
@@ -130,23 +174,31 @@ export async function publishObject({ envelope, node, addressing, contracts, log
   log(`   head: ${headState.confirmed ? 'confirmed' : `⚠ ${headState.detail}`}`)
 
   // ── 4. pokes ───────────────────────────────────────────────────
-  const targets = relationTargets(envelope)
-  log(`── 4/4 poking ${targets.length} distinct relation target(s)`)
+  const current = relationTargets(envelope)
+  const currentSet = new Set(current)
+  const tombstones = droppedTargets.filter(t => !currentSet.has(t))
+  const targets = [...current, ...tombstones].sort()
+  log(
+    `── 4/4 poking ${targets.length} distinct relation target(s)` +
+    (tombstones.length ? `, ${tombstones.length} of them dropped since revision ${revision}` : ''),
+  )
 
   const pokes = []
   for (const target of targets) {
+    const tombstone = !currentSet.has(target)
     try {
       const { indexId, created } = await pokeTarget({
         target, sourceRef: ref, revision, node, addressing, contracts, log,
       })
-      pokes.push({ target, indexId, created, ok: true, error: null })
-      log(`   ✓ ${target}`)
+      pokes.push({ target, indexId, created, tombstone, ok: true, error: null })
+      log(`   ✓ ${target}${tombstone ? '  (relation dropped — tombstoning)' : ''}`)
     } catch (err) {
-      pokes.push({ target, indexId: null, created: false, ok: false, error: err.message })
+      pokes.push({ target, indexId: null, created: false, tombstone, ok: false, error: err.message })
       log(`   ✗ ${target}  (${err.message.split('\n')[0]})`)
     }
   }
 
+  const failed = pokes.filter(p => !p.ok).length
   return {
     ref,
     revision,
@@ -154,6 +206,10 @@ export async function publishObject({ envelope, node, addressing, contracts, log
     headId,
     headState,
     pokes,
-    failed: pokes.filter(p => !p.ok).length,
+    failed,
+    // Success means the object is actually live: the head is confirmed AND
+    // every index was told about it. A confirmed-nothing head with happy
+    // pokes is not a success, however green the poke report looks.
+    ok: failed === 0 && headState.confirmed,
   }
 }

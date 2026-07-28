@@ -209,3 +209,45 @@ test('a slot key that is not a parseable ref is unverified, not a crash', async 
   assert.match(report.slots[0].detail, /ref/i)
   assert.equal(report.ok, false)
 })
+
+// ─── ref canonicalisation and D2 slot bounds ─────────────────────
+
+test('an uppercase uuid in the queried ref still matches the signed relations', async () => {
+  // objectParams is uuid-case-insensitive, so an uppercase ref reaches the
+  // right index; the relation comparison must agree, or every slot would
+  // read as unverified purely because of how the ref was typed.
+  const [pk, uuid] = TARGET.split('.')
+  const upper = `${pk}.${uuid.toUpperCase()}`
+  const env = sourceEnvelope()
+  const node = fakeNode({
+    index: { v: 1, slots: { [SOURCE]: { revision: 3, relations: ['root'] } } },
+    snapshots: { [`${SOURCE}@3`]: env },
+    heads: { [SOURCE]: env },
+  })
+  const report = await verifyIndex({ ref: upper, node, addressing: ADDRESSING, log: () => {} })
+  assert.equal(report.slots[0].status, 'verified-current')
+})
+
+test('D2 bounds are mirrored: over-long relation names are not expected in a slot', async () => {
+  const longName = 'x'.repeat(129) // > 128 chars: the contract drops it
+  const env = sourceEnvelope({ relations: { root: [{ ref: TARGET }], [longName]: [{ ref: TARGET }] } })
+  const report = await run(fakeNode({
+    index: { v: 1, slots: { [SOURCE]: { revision: 3, relations: ['root'] } } },
+    snapshots: { [`${SOURCE}@3`]: env },
+    heads: { [SOURCE]: env },
+  }))
+  assert.equal(report.slots[0].status, 'verified-current')
+})
+
+test('D2 bounds are mirrored: the expected relation list truncates at 64', async () => {
+  const relations = {}
+  for (let i = 0; i < 70; i++) relations[`rel${String(i).padStart(3, '0')}`] = [{ ref: TARGET }]
+  const env = sourceEnvelope({ relations })
+  const expected = Object.keys(relations).sort().slice(0, 64)
+  const report = await run(fakeNode({
+    index: { v: 1, slots: { [SOURCE]: { revision: 3, relations: expected } } },
+    snapshots: { [`${SOURCE}@3`]: env },
+    heads: { [SOURCE]: env },
+  }))
+  assert.equal(report.slots[0].status, 'verified-current')
+})

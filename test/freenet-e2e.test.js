@@ -184,6 +184,41 @@ describe('freenet e2e — live node', { skip: noNode }, () => {
     assert.match(stderr, /not found|revision 9999/i)
   })
 
+  it('US-2.4: dropping a relation tombstones the slot in the dropped target', async () => {
+    // A second target, linked at this revision and dropped at the next.
+    const spec = join(store.dir, 'drop.json')
+    writeFileSync(spec, JSON.stringify({ type: 'NOTE', name: 'e2e drop target', instruction: 'dropped' }))
+    const dropRef = lastLine((await ig(['create', spec, '--no-push'])).stdout)
+
+    const id = sourceRef.split('.').slice(1).join('.')
+    const linked = {
+      id,
+      type: 'NOTE',
+      name: 'e2e source',
+      instruction: 'source',
+      relations: { root: [{ ref: targetRef }], mentions: [{ ref: targetRef }], drops: [{ ref: dropRef }] },
+    }
+    writeFileSync(spec, JSON.stringify(linked))
+    assert.equal((await ig(['create', spec, '--update', '--no-push'])).code, 0)
+    assert.equal((await fn('publish', sourceRef)).code, 0)
+
+    const before = JSON.parse((await fn('inbound', dropRef)).stdout)
+    assert.deepEqual(before[sourceRef].relations, ['drops'])
+
+    // Next revision drops it. The index only learns that if we poke it too.
+    delete linked.relations.drops
+    writeFileSync(spec, JSON.stringify(linked))
+    assert.equal((await ig(['create', spec, '--update', '--no-push'])).code, 0)
+
+    const publish = await fn('publish', sourceRef)
+    assert.equal(publish.code, 0, publish.stderr)
+    assert.match(publish.stderr, /tombstoning/)
+
+    const after = JSON.parse((await fn('inbound', dropRef)).stdout)
+    assert.deepEqual(after[sourceRef].relations, [], 'observed absence is the tombstone')
+    assert.ok(after[sourceRef].revision > before[sourceRef].revision)
+  })
+
   it('an object nothing has pointed at has no index yet', async () => {
     // targetRef itself points at nobody but its author, and nothing points at
     // that author here, so the author's index exists while a fresh object's

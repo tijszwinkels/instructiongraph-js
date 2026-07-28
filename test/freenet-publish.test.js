@@ -110,11 +110,16 @@ test('runs snapshot PUT → GET-back → head PUT → pokes, in that order', asy
   assert.equal(node.calls[0].paramsLen, 40)
   assert.equal(ops[1], 'get', 'GET-back gate second')
   assert.equal(node.calls[1].id, ADDRESSING.snapshotId(SELF, 3))
-  assert.equal(ops[2], 'publish', 'head PUT third')
-  assert.equal(node.calls[2].wasmPath, CONTRACTS.paths.object)
-  assert.equal(node.calls[2].paramsLen, 32)
-  // Everything after the head belongs to the poke phase.
-  assert.ok(node.calls.slice(3).some(c => c.op === 'update'))
+  // 2b: read the previous head before our PUT replaces it (US-2.4).
+  assert.equal(ops[2], 'probe')
+  assert.equal(node.calls[2].id, ADDRESSING.headId(SELF))
+
+  const headPut = node.calls.findIndex(c => c.op === 'publish' && c.wasmPath === CONTRACTS.paths.object)
+  assert.equal(headPut, 3, 'head PUT follows')
+  assert.equal(node.calls[headPut].paramsLen, 32)
+  // Every poke comes after the head.
+  const firstPoke = node.calls.findIndex(c => c.op === 'update')
+  assert.ok(firstPoke > headPut)
   assert.equal(report.failed, 0)
 })
 
@@ -304,4 +309,84 @@ test('re-running makes the identical set of node calls — the flow is idempoten
     first.calls.filter(c => c.op === 'update').map(c => c.payload),
     'the same poke is re-sent; the contract merges it LWW',
   )
+})
+
+// ─── US-2.4: relation removal propagates ─────────────────────────
+
+test('a target dropped since the previous head is still poked, so it can tombstone', async () => {
+  // rev 3 linked ROOT and AUTHOR; rev 4 drops AUTHOR. Poking AUTHOR with
+  // (source, 4) makes its index fetch our rev-4 snapshot, find no relation to
+  // itself, and write {revision: 4, relations: []} — the tombstone (US-2.4).
+  const previous = envelope({ revision: 3, relations: { root: [{ ref: ROOT }], author: [{ ref: AUTHOR }] } })
+  const current = envelope({ revision: 4, relations: { root: [{ ref: ROOT }] } })
+
+  const node = nodeWithSnapshot(current)
+  node.present.set(ADDRESSING.headId(SELF), previous)
+
+  const report = await run(current, node)
+
+  assert.deepEqual(
+    new Set(report.pokes.map(p => p.target)),
+    new Set([ROOT, AUTHOR]),
+    'the dropped target must still be poked',
+  )
+  assert.equal(report.pokes.find(p => p.target === AUTHOR).tombstone, true)
+  assert.equal(report.pokes.find(p => p.target === ROOT).tombstone, false)
+  assert.equal(report.failed, 0)
+})
+
+test('the previous head is read BEFORE it is overwritten', async () => {
+  const previous = envelope({ revision: 3, relations: { author: [{ ref: AUTHOR }] } })
+  const current = envelope({ revision: 4, relations: { root: [{ ref: ROOT }] } })
+  const node = nodeWithSnapshot(current)
+  node.present.set(ADDRESSING.headId(SELF), previous)
+
+  await run(current, node)
+
+  const probeAt = node.calls.findIndex(c => c.op === 'probe' && c.id === ADDRESSING.headId(SELF))
+  const headPut = node.calls.findIndex(c => c.op === 'publish' && c.wasmPath === CONTRACTS.paths.object)
+  assert.ok(probeAt !== -1, 'the previous head is probed')
+  assert.ok(probeAt < headPut, 'and read before our PUT replaces it')
+})
+
+test('a head at or beyond our revision contributes no tombstones', async () => {
+  // Not our predecessor — someone else's newer state, or our own re-publish.
+  const same = envelope({ revision: 3, relations: { author: [{ ref: AUTHOR }] } })
+  const current = envelope({ revision: 3, relations: { root: [{ ref: ROOT }] } })
+  const node = nodeWithSnapshot(current)
+  node.present.set(ADDRESSING.headId(SELF), same)
+
+  const report = await run(current, node)
+  assert.deepEqual(report.pokes.map(p => p.target), [ROOT])
+})
+
+test('no previous head on the node simply means no tombstones', async () => {
+  const env = envelope({ relations: { root: [{ ref: ROOT }] } })
+  const node = fakeNode()
+  node.present.set(ADDRESSING.snapshotId(SELF, 3), env)
+  const report = await run(env, node)
+  assert.deepEqual(report.pokes.map(p => p.target), [ROOT])
+  assert.equal(report.failed, 0)
+})
+
+// ─── head confirmation ───────────────────────────────────────────
+
+test('an unconfirmed head is reported as not confirmed', async () => {
+  const env = envelope({ relations: {} })
+  const node = fakeNode()
+  node.present.set(ADDRESSING.snapshotId(SELF, 3), env)
+  // The head GET-back returns someone else's newer state — LWW kept theirs.
+  node.present.set(ADDRESSING.headId(SELF), { ...env, signature: 'SIG-THEIRS', item: { ...env.item, revision: 9 } })
+
+  const report = await run(env, node)
+  assert.equal(report.headState.confirmed, false)
+  assert.match(report.headState.detail, /9/)
+  assert.equal(report.ok, false, 'the overall result is not a success')
+})
+
+test('a confirmed head with all pokes ok is a success', async () => {
+  const env = envelope({ relations: { root: [{ ref: ROOT }] } })
+  const report = await run(env, nodeWithSnapshot(env))
+  assert.equal(report.headState.confirmed, true)
+  assert.equal(report.ok, true)
 })
