@@ -23,16 +23,22 @@ import { canonicalRef } from './addressing.js'
  */
 export function relationTargets(envelope) {
   const relations = envelope?.item?.relations
-  const targets = new Set()
+  // Keyed canonically: two spellings of one ref (uuid case) address the SAME
+  // index contract, so poking both is a wasted round-trip on a flow whose
+  // entire cost is round-trips. Malformed refs key on themselves and survive
+  // to be reported, rather than being silently dropped here.
+  const targets = new Map()
   if (relations && typeof relations === 'object') {
     for (const entries of Object.values(relations)) {
       if (!Array.isArray(entries)) continue
       for (const entry of entries) {
-        if (entry && typeof entry.ref === 'string' && entry.ref) targets.add(entry.ref)
+        if (!entry || typeof entry.ref !== 'string' || !entry.ref) continue
+        const key = canonicalOrNull(entry.ref)
+        if (!targets.has(key)) targets.set(key, entry.ref)
       }
     }
   }
-  return [...targets].sort()
+  return [...targets.values()].sort()
 }
 
 /**

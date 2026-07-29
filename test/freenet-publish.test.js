@@ -390,3 +390,19 @@ test('a confirmed head with all pokes ok is a success', async () => {
   assert.equal(report.headState.confirmed, true)
   assert.equal(report.ok, true)
 })
+
+test('two spellings of one ref are one target, not two pokes at one index', async () => {
+  // Addressing is uuid-case-insensitive, so both spellings resolve to the
+  // same index contract. Poking it twice is wasted work on a flow whose
+  // whole cost is round-trips.
+  const [pk, uuid] = AUTHOR.split('.')
+  const upper = `${pk}.${uuid.toUpperCase()}`
+  assert.notEqual(upper, AUTHOR, 'this uuid must actually contain letters')
+  const env = envelope({ relations: { root: [{ ref: AUTHOR }], alias: [{ ref: upper }] } })
+  const node = nodeWithSnapshot(env)
+  const report = await run(env, node)
+
+  assert.equal(report.pokes.length, 1)
+  assert.equal(node.calls.filter(c => c.op === 'update').length, 1)
+  assert.equal(node.calls.find(c => c.op === 'update').id, ADDRESSING.indexId(AUTHOR))
+})
