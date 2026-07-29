@@ -89,14 +89,32 @@ async function verifySlot({ source, slot, target, node, addressing }) {
 }
 
 /**
+ * One slot's human-readable line. Lives here, next to the statuses it
+ * renders, so there is a single formatter — the caller chooses the stream,
+ * never the wording.
+ *
+ * @param {object} result - an entry of the report's `slots`
+ * @returns {string}
+ */
+export function formatSlot(result) {
+  return `${result.status.padEnd(17)} ${result.source} @ ${result.slot?.revision}` +
+    (result.detail ? `  (${result.detail})` : '')
+}
+
+/**
  * @param {object} opts
  * @param {string} opts.ref - the index target
  * @param {object} opts.node
  * @param {object} opts.addressing
- * @param {(msg: string) => void} [opts.log]
+ * @param {(msg: string) => void} [opts.log] - headline progress
+ * @param {(result: object) => void} [opts.onSlot] - called as each slot
+ *   resolves, so a caller can stream results while the rest are still being
+ *   fetched. Verification does NOT print slots itself: whether a slot line is
+ *   payload (stdout) or progress (stderr) is the caller's decision, and
+ *   deciding here is what made it get printed twice.
  * @returns {Promise<{ref, indexId, slots: object[], unverified: number, ok: boolean}>}
  */
-export async function verifyIndex({ ref, node, addressing, log = () => {} }) {
+export async function verifyIndex({ ref, node, addressing, log = () => {}, onSlot = () => {} }) {
   parseRef(ref)
   const indexId = addressing.indexId(ref)
 
@@ -117,7 +135,7 @@ export async function verifyIndex({ ref, node, addressing, log = () => {} }) {
   for (const [source, slot] of entries) {
     const result = await verifySlot({ source, slot, target: ref, node, addressing })
     slots.push(result)
-    log(`${result.status.padEnd(17)} ${source} @ ${slot?.revision}${result.detail ? `  (${result.detail})` : ''}`)
+    onSlot(result)
   }
 
   const unverified = slots.filter(s => s.status === 'unverified').length

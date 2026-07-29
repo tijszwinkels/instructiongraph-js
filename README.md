@@ -209,7 +209,11 @@ Notes and limits:
 - **The contract WASMs are pinned artifacts, never rebuilt on the fly.** Their
   bytes define the keyspace: a rebuilt contract addresses a different, empty
   universe, and every existing object then reads as unpublished rather than as
-  an error. Hence a configured directory rather than a build step.
+  an error. Hence a configured directory rather than a build step. The
+  canonical source of the pinned builds is `artifacts/` in
+  [`tijszwinkels/dataverse-freenet`](https://github.com/tijszwinkels/dataverse-freenet);
+  point `freenet-contracts-dir` at a checkout of it. There is deliberately no
+  default — any default would be a machine-specific path into another repo.
 - `ig freenet get --rev N` never falls back to the head. The absence of a
   revision is meaningful; answering with a different revision would be worse
   than answering nothing.

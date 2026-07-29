@@ -20,7 +20,7 @@ import { loadContracts } from '../src/freenet/contracts.js'
 import { createAddressing, parseRef } from '../src/freenet/addressing.js'
 import { createFdevNode } from '../src/freenet/fdev.js'
 import { publishObject } from '../src/freenet/publish.js'
-import { verifyIndex } from '../src/freenet/verify.js'
+import { verifyIndex, formatSlot } from '../src/freenet/verify.js'
 
 const USAGE = `Usage: ig freenet <command> [options]
 
@@ -216,18 +216,17 @@ async function cmdVerify(positional, flags) {
   const [ref] = positional
   if (!ref) throw new Error('Usage: ig freenet verify <ref>')
   const { addressing, node } = openBackend(flags)
-  const report = await verifyIndex({ ref, node, addressing, log })
 
-  if (flags.json) {
-    console.log(JSON.stringify(report, null, 2))
-  } else {
-    for (const slot of report.slots) {
-      console.log(
-        `${slot.status.padEnd(17)} ${slot.source} @ ${slot.slot?.revision}` +
-        (slot.detail ? `  (${slot.detail})` : ''),
-      )
-    }
-  }
+  // Each slot is printed exactly once, as it resolves. In human mode the
+  // slot lines ARE the payload, so they stream to stdout; under --json the
+  // payload is the report, so the same lines stream to stderr as progress.
+  const onSlot = flags.json
+    ? (slot) => log(formatSlot(slot))
+    : (slot) => console.log(formatSlot(slot))
+
+  const report = await verifyIndex({ ref, node, addressing, log, onSlot })
+  if (flags.json) console.log(JSON.stringify(report, null, 2))
+
   log(`── ${report.slots.length} slot(s), ${report.unverified} unverified`)
   if (!report.ok) {
     throw new Error('Some slots could not be verified against their snapshots.')

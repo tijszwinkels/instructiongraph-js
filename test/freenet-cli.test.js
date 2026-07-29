@@ -374,4 +374,43 @@ describe('ig freenet', () => {
     assert.match(stdout, /verified-stale/)
     assert.match(stdout, /head is at 5/)
   })
+
+  // ─── output discipline ─────────────────────────────────────────
+
+  it('verify prints each slot exactly once, on stdout', async () => {
+    const seeded = {
+      contracts: {
+        [addressing.indexId(targetRef)]: {
+          v: 1,
+          slots: { [sourceRef]: { revision: 0, relations: ['mentions', 'root'] } },
+        },
+        [addressing.snapshotId(sourceRef, 0)]: sourceEnv,
+        [addressing.headId(sourceRef)]: sourceEnv,
+      },
+    }
+    const { stdout, stderr, code } = await fn('verify', targetRef, seeded)
+    assert.equal(code, 0)
+
+    const count = (text) => text.split('\n').filter(l => l.includes('verified-current')).length
+    assert.equal(count(stdout), 1, 'the slot line belongs on stdout')
+    assert.equal(count(stderr), 0, 'and must not be repeated as stderr progress')
+  })
+
+  it('verify --json keeps stdout pure JSON and streams progress to stderr', async () => {
+    const seeded = {
+      contracts: {
+        [addressing.indexId(targetRef)]: {
+          v: 1,
+          slots: { [sourceRef]: { revision: 0, relations: ['mentions', 'root'] } },
+        },
+        [addressing.snapshotId(sourceRef, 0)]: sourceEnv,
+        [addressing.headId(sourceRef)]: sourceEnv,
+      },
+    }
+    const { stdout, stderr, code } = await fn('verify', targetRef, '--json', seeded)
+    assert.equal(code, 0)
+    const report = JSON.parse(stdout) // throws if anything else leaked to stdout
+    assert.equal(report.slots[0].status, 'verified-current')
+    assert.match(stderr, /verified-current/, 'progress still streams while it works')
+  })
 })

@@ -189,7 +189,7 @@ export async function publishObject({ envelope, node, addressing, contracts, log
 
   const pokes = []
   for (const target of targets) {
-      const tombstone = !currentSet.has(refKey(target))
+    const tombstone = !currentSet.has(refKey(target))
     try {
       const { indexId, created } = await pokeTarget({
         target, sourceRef: ref, revision, node, addressing, contracts, log,
