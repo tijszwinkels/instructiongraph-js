@@ -63,7 +63,7 @@ export function relationTargets(envelope) {
       }
     }
   }
-  return [...targets.values()].sort()
+  return [...targets.values()].sort(compareUtf8)
 }
 
 /**
@@ -97,7 +97,7 @@ export function relationNamesTargeting(envelope, target) {
       }
     }
   }
-  return [...names].sort().slice(0, MAX_RELATIONS_PER_SLOT)
+  return [...names].sort(compareUtf8).slice(0, MAX_RELATIONS_PER_SLOT)
 }
 
 /**
@@ -108,6 +108,26 @@ export function relationNamesTargeting(envelope, target) {
  * then read as a door-2 artifact for no reason but the encoding.
  */
 const codePoints = (s) => [...s].length
+
+const utf8 = new TextEncoder()
+
+/**
+ * Rust's `String` ordering: lexicographic over UTF-8 BYTES.
+ *
+ * JS's default sort compares UTF-16 code units, and the two disagree above
+ * U+E000 — a non-BMP character is a surrogate pair beginning 0xD800, so JS
+ * sorts it BEFORE U+E000 while Rust (and code-point order) sorts it after.
+ * The contract sorts before it truncates to 64 and before it serializes the
+ * slot, so a different order here means both a mismatched comparison and
+ * potentially a different 64 names surviving.
+ */
+function compareUtf8(a, b) {
+  const x = utf8.encode(a)
+  const y = utf8.encode(b)
+  const n = Math.min(x.length, y.length)
+  for (let i = 0; i < n; i++) if (x[i] !== y[i]) return x[i] - y[i]
+  return x.length - y.length
+}
 
 /** An envelope's ref. */
 export function envelopeRef(envelope) {

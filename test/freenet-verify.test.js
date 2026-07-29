@@ -277,3 +277,23 @@ test('a name beyond 128 code points is dropped, as the contract drops it', async
   }))
   assert.equal(report.slots[0].status, 'verified-current')
 })
+
+test('relation names sort in UTF-8 byte order, as Rust String ordering does', async () => {
+  // Rust compares strings by UTF-8 bytes (== code point order). JS's default
+  // sort compares UTF-16 code units, which disagree above U+E000: a non-BMP
+  // character is a surrogate pair starting 0xD800, so it sorts BEFORE U+E000
+  // in JS and AFTER it in Rust. Get this wrong and the expected list is in a
+  // different order from the slot the contract wrote, failing an honest slot.
+  const pua = ''
+  const emoji = '\u{1F600}'
+  assert.deepEqual([emoji, pua].sort(), [emoji, pua], 'JS default order, for contrast')
+
+  const env = sourceEnvelope({ relations: { [pua]: [{ ref: TARGET }], [emoji]: [{ ref: TARGET }] } })
+  const report = await run(fakeNode({
+    // The order the contract writes: UTF-8 bytes, so U+E000 comes first.
+    index: { v: 1, slots: { [SOURCE]: { revision: 3, relations: [pua, emoji] } } },
+    snapshots: { [`${SOURCE}@3`]: env },
+    heads: { [SOURCE]: env },
+  }))
+  assert.equal(report.slots[0].status, 'verified-current')
+})
