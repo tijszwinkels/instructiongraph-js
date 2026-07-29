@@ -139,6 +139,10 @@ Commands:
   ig git clone <ref> [dir]              Clone a hosted repo (names dir after it)
   ig git fork <upstream> [--name N]     Thin-fork a repo you can contribute to
   ig git merge <fork> [branch]          Merge a fork branch into upstream (owner)
+  ig freenet publish <ref>              Publish to Freenet; poke targets' indexes
+  ig freenet get <ref> [--rev N]        Read a head, or one immutable revision
+  ig freenet inbound <ref>              Inbound-relations index (who points here)
+  ig freenet verify <ref>               Verify index slots against their snapshots
 
 Run 'ig <command> --help' for command-specific help.`)
   process.exit(0)
@@ -765,7 +769,9 @@ const QUIET_COMMANDS = new Set(['identity', 'server', 'status', 'verify', 'get',
 
 async function main() {
   if (!cmd || cmd === '--help' || cmd === '-h') usage()
-  if (hasHelp()) commandUsage(cmd)
+  // `freenet` documents its own subcommands (and their flags) in cli/freenet.js,
+  // so it handles --help itself rather than through the flat docs map.
+  if (cmd !== 'freenet' && hasHelp()) commandUsage(cmd)
 
   switch (cmd) {
     case 'status': {
@@ -1180,6 +1186,13 @@ async function main() {
       } else {
         die('Usage: ig git [init [name] [--realm R] | clone <ref> [dir] | fork <upstream> | merge <fork> [branch]]')
       }
+      break
+    }
+
+    case 'freenet': {
+      // Own flag set, config keys and output contract — see cli/freenet.js.
+      const { runFreenet } = await import('./freenet.js')
+      await runFreenet(args.slice(1))
       break
     }
 
