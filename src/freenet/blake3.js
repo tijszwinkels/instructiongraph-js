@@ -1,16 +1,37 @@
 /**
  * BLAKE3 (256-bit, unkeyed) — the hash Freenet uses for contract addressing.
  *
- * Vendored rather than taken as a dependency: this package ships to npm with
- * zero runtime dependencies, and address derivation is the only thing that
- * needs BLAKE3. It is a self-contained port of the reference implementation
- * (https://github.com/BLAKE3-team/BLAKE3, reference_impl.rs), verified against
- * the project's official test vectors in test/freenet-hash.test.js.
+ * ┌─────────────────────────────────────────────────────────────────────────┐
+ * │ VENDORED CODE — DO NOT HAND-EDIT.                                       │
+ * │                                                                         │
+ * │ Origin:  the BLAKE3 reference implementation, reference_impl.rs         │
+ * │          https://github.com/BLAKE3-team/BLAKE3 (ported to JS)           │
+ * │ Licence: the reference implementation is dual-licensed CC0-1.0 and      │
+ * │          Apache-2.0; this port is distributed under the package's       │
+ * │          GPL-3.0-only, which both permit.                               │
+ * │ Proof:   validated against the project's OFFICIAL test vectors — see    │
+ * │          test/freenet-hash.test.js, 23 cases spanning every structural  │
+ * │          boundary (empty, sub-block, exact block, chunk boundaries at   │
+ * │          1023/1024/1025, multi-level merkle trees to 102400 bytes).     │
+ * │                                                                         │
+ * │ Changing anything here without re-running those vectors risks silently  │
+ * │ relocating every contract address. Fix bugs upstream-style: adjust to   │
+ * │ match the reference, then let the vectors confirm it.                   │
+ * └─────────────────────────────────────────────────────────────────────────┘
+ *
+ * Why vendored at all: this package ships to npm with ZERO runtime
+ * dependencies, and address derivation is the only thing that needs BLAKE3.
+ * Taking @noble/hashes would push a transitive dependency onto every consumer
+ * of the library for a feature most never touch. If that trade-off is ever
+ * judged the wrong way round, it is a one-line swap — this module's only
+ * export used elsewhere is `blake3(Uint8Array) -> Uint8Array`.
  *
  * Scope is deliberately minimal: unkeyed hashing, 32-byte output, one-shot
  * over an in-memory buffer. No keyed mode, no derive_key, no XOF — none of
- * which contract addressing uses. Not a general-purpose crypto primitive:
- * signing in this codebase stays on Web Crypto (src/crypto.js).
+ * which contract addressing uses, and every line that isn't here can't be
+ * wrong. NOT a general-purpose crypto primitive, and not security-critical:
+ * it derives addresses, not signatures. Signing stays on Web Crypto
+ * (src/crypto.js) and is untouched.
  *
  * Pure and browser-safe (no node: imports).
  */

@@ -1,9 +1,23 @@
 /**
  * base58 (Bitcoin alphabet) — how Freenet renders contract instance ids.
  *
+ * ┌─────────────────────────────────────────────────────────────────────────┐
+ * │ VENDORED CODE — DO NOT HAND-EDIT.                                       │
+ * │                                                                         │
+ * │ Origin:  an independent implementation of the standard base58           │
+ * │          byte-at-a-time long-division algorithm (as described for       │
+ * │          Bitcoin's base58; no third-party code copied).                 │
+ * │ Proof:   validated in test/freenet-hash.test.js against the Bitcoin     │
+ * │          spec vectors, plus round-trips pinning the leading-zero rule   │
+ * │          and rejection of the excluded 0/O/I/l characters.              │
+ * │                                                                         │
+ * │ Re-run those vectors after any change: a base58 bug renders a valid     │
+ * │ address as a plausible-looking wrong one.                              │
+ * └─────────────────────────────────────────────────────────────────────────┘
+ *
  * Vendored for the same reason as blake3.js: this package has no runtime
- * dependencies. Byte-at-a-time long division, so no BigInt and no precision
- * limits. Leading zero bytes map to leading '1's, as the standard requires.
+ * dependencies. Long division byte-at-a-time, so no BigInt and no precision
+ * ceiling. Leading zero bytes map to leading '1's, as the standard requires.
  *
  * Pure and browser-safe.
  */
