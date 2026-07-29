@@ -18,7 +18,7 @@
  */
 
 import { objectParams, snapshotParams, parseRef } from './addressing.js'
-import { relationTargets, envelopeRef, envelopeRevision } from './relations.js'
+import { relationTargets, relationKey as refKey, envelopeRef, envelopeRevision } from './relations.js'
 
 /** The initial state of an index nobody has poked yet (D2 wire format). */
 const EMPTY_INDEX = { v: 1, slots: {} }
@@ -175,8 +175,12 @@ export async function publishObject({ envelope, node, addressing, contracts, log
 
   // ── 4. pokes ───────────────────────────────────────────────────
   const current = relationTargets(envelope)
-  const currentSet = new Set(current)
-  const tombstones = droppedTargets.filter(t => !currentSet.has(t))
+  // Compared by the contract's own notion of "same object" (derived bytes),
+  // not by ref string: a ref merely RESPELLED between revisions (uuid case)
+  // points at the same index and has not been dropped. Comparing strings
+  // would poke it twice and mislabel one of them a tombstone.
+  const currentSet = new Set(current.map(refKey))
+  const tombstones = droppedTargets.filter(t => !currentSet.has(refKey(t)))
   const targets = [...current, ...tombstones].sort()
   log(
     `── 4/4 poking ${targets.length} distinct relation target(s)` +
@@ -185,7 +189,7 @@ export async function publishObject({ envelope, node, addressing, contracts, log
 
   const pokes = []
   for (const target of targets) {
-    const tombstone = !currentSet.has(target)
+      const tombstone = !currentSet.has(refKey(target))
     try {
       const { indexId, created } = await pokeTarget({
         target, sourceRef: ref, revision, node, addressing, contracts, log,

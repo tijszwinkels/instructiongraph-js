@@ -8,7 +8,32 @@
  * share this module rather than each doing their own walk.
  */
 
-import { canonicalRef } from './addressing.js'
+import { objectParams } from './addressing.js'
+
+/**
+ * The identity the index contract uses for a ref.
+ *
+ * The contract does NOT compare ref strings — it compares derived bytes:
+ *
+ *   owner_addr_from_pubkey(pubkey) == target_addr && uuid == target_uuid
+ *
+ * which is exactly the 32-byte object params. Mirroring that (rather than
+ * inventing our own canonical string) means our reading of "same object"
+ * cannot drift from the contract's — including uuid case, which the contract
+ * folds away by parsing the uuid to bytes.
+ *
+ * Unparseable refs key on themselves. The contract skips them entirely
+ * (validate_ref(...).ok()), and since a verification target is always
+ * parseable, a self-keyed junk ref can never match one — same outcome, while
+ * still surviving to be reported by the publish flow.
+ */
+export function relationKey(ref) {
+  try {
+    return [...objectParams(ref)].map(b => b.toString(16).padStart(2, '0')).join('')
+  } catch {
+    return `raw:${ref}`
+  }
+}
 
 /**
  * Every distinct target ref in `item.relations`, sorted.
@@ -33,7 +58,7 @@ export function relationTargets(envelope) {
       if (!Array.isArray(entries)) continue
       for (const entry of entries) {
         if (!entry || typeof entry.ref !== 'string' || !entry.ref) continue
-        const key = canonicalOrNull(entry.ref)
+        const key = relationKey(entry.ref)
         if (!targets.has(key)) targets.set(key, entry.ref)
       }
     }
@@ -47,7 +72,7 @@ export function relationTargets(envelope) {
  * so a verifier that does not apply them computes an expectation the contract
  * could never have written, and reports honest slots as door-2 artifacts.
  */
-const MAX_RELATION_NAME = 128
+const MAX_RELATION_NAME_CHARS = 128
 const MAX_RELATIONS_PER_SLOT = 64
 
 /**
@@ -56,18 +81,18 @@ const MAX_RELATIONS_PER_SLOT = 64
  * the shape a verified index slot carries (D2).
  *
  * @param {object} envelope
- * @param {string} target - compared canonically; see canonicalRef
+ * @param {string} target - compared by derived bytes; see relationKey
  * @returns {string[]}
  */
 export function relationNamesTargeting(envelope, target) {
   const relations = envelope?.item?.relations
-  const wanted = canonicalOrNull(target)
+  const wanted = relationKey(target)
   const names = new Set()
   if (relations && typeof relations === 'object') {
     for (const [name, entries] of Object.entries(relations)) {
       if (!Array.isArray(entries)) continue
-      if (!name || name.length > MAX_RELATION_NAME) continue
-      if (entries.some(e => e && typeof e.ref === 'string' && canonicalOrNull(e.ref) === wanted)) {
+      if (!name || codePoints(name) > MAX_RELATION_NAME_CHARS) continue
+      if (entries.some(e => e && typeof e.ref === 'string' && relationKey(e.ref) === wanted)) {
         names.add(name)
       }
     }
@@ -75,14 +100,14 @@ export function relationNamesTargeting(envelope, target) {
   return [...names].sort().slice(0, MAX_RELATIONS_PER_SLOT)
 }
 
-/** Canonical form of a ref, or the raw string when it cannot be parsed. */
-function canonicalOrNull(ref) {
-  try {
-    return canonicalRef(ref)
-  } catch {
-    return ref
-  }
-}
+/**
+ * Length in Unicode code points — what Rust's `chars().count()` counts.
+ *
+ * JS `.length` counts UTF-16 code units, so a name of 100 emoji measures 200
+ * there. Using it would drop a name the contract kept, and the slot would
+ * then read as a door-2 artifact for no reason but the encoding.
+ */
+const codePoints = (s) => [...s].length
 
 /** An envelope's ref. */
 export function envelopeRef(envelope) {

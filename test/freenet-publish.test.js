@@ -406,3 +406,20 @@ test('two spellings of one ref are one target, not two pokes at one index', asyn
   assert.equal(node.calls.filter(c => c.op === 'update').length, 1)
   assert.equal(node.calls.find(c => c.op === 'update').id, ADDRESSING.indexId(AUTHOR))
 })
+
+test('a ref respelled between revisions is not mistaken for a dropped target', async () => {
+  // The previous head spelled the ref with an uppercase uuid; this one uses
+  // lowercase. Same index contract — so it is NOT dropped, and must be poked
+  // once, as a normal target rather than a tombstone.
+  const [pk, uuid] = AUTHOR.split('.')
+  const previous = envelope({ revision: 3, relations: { author: [{ ref: `${pk}.${uuid.toUpperCase()}` }] } })
+  const current = envelope({ revision: 4, relations: { author: [{ ref: AUTHOR }] } })
+  const node = nodeWithSnapshot(current)
+  node.present.set(ADDRESSING.headId(SELF), previous)
+
+  const report = await run(current, node)
+
+  assert.equal(report.pokes.length, 1)
+  assert.equal(report.pokes[0].tombstone, false)
+  assert.equal(node.calls.filter(c => c.op === 'update').length, 1)
+})

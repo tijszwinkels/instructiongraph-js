@@ -251,3 +251,29 @@ test('D2 bounds are mirrored: the expected relation list truncates at 64', async
   }))
   assert.equal(report.slots[0].status, 'verified-current')
 })
+
+test('the 128-char bound counts code points, exactly as the contract does', async () => {
+  // The contract uses Rust's name.chars().count() — Unicode scalar values.
+  // JS .length counts UTF-16 code units, so 100 non-BMP characters measure
+  // 200 there and the name would be wrongly dropped from the expectation,
+  // failing a slot the contract legitimately wrote.
+  const name = '😀'.repeat(100) // 100 code points, 200 UTF-16 units
+  const env = sourceEnvelope({ relations: { [name]: [{ ref: TARGET }], root: [{ ref: TARGET }] } })
+  const report = await run(fakeNode({
+    index: { v: 1, slots: { [SOURCE]: { revision: 3, relations: [name, 'root'].sort() } } },
+    snapshots: { [`${SOURCE}@3`]: env },
+    heads: { [SOURCE]: env },
+  }))
+  assert.equal(report.slots[0].status, 'verified-current')
+})
+
+test('a name beyond 128 code points is dropped, as the contract drops it', async () => {
+  const tooLong = 'é'.repeat(129)
+  const env = sourceEnvelope({ relations: { [tooLong]: [{ ref: TARGET }], root: [{ ref: TARGET }] } })
+  const report = await run(fakeNode({
+    index: { v: 1, slots: { [SOURCE]: { revision: 3, relations: ['root'] } } },
+    snapshots: { [`${SOURCE}@3`]: env },
+    heads: { [SOURCE]: env },
+  }))
+  assert.equal(report.slots[0].status, 'verified-current')
+})

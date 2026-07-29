@@ -156,22 +156,26 @@ test('get returns the parsed state and found=true', async () => {
 })
 
 test('get reports not-found rather than throwing, and says so plainly', async () => {
-  const { exec } = fakeExec([{ code: 1, stderr: 'contract not found' }])
+  // fdev's real wording for a genuine miss (0.3.274): exit 1, no output file.
+  const { exec } = fakeExec([{ code: 1, stderr: 'client error: missing contract: ID' }])
   const res = await createFdevNode({ fdevPath: 'fdev', port: 7509, exec }).get('ID')
   assert.equal(res.found, false)
   assert.equal(res.state, null)
   assert.match(res.detail, /not found|no state/i)
 })
 
-test('an empty output file is a miss, not an empty state', async () => {
+test('exit 0 with no state is anomalous, and is surfaced rather than called absence', async () => {
+  // fdev signals a genuine miss with exit 1 and no output file. Exit 0 with
+  // nothing written is a case we do not understand — and guessing "absent"
+  // is the dangerous guess, because it licenses the flow to create indexes.
   const { exec } = fakeExec([
     async ({ args }) => {
       await writeFile(args[args.indexOf('--output') + 1], '')
       return { code: 0 }
     },
   ])
-  const res = await createFdevNode({ fdevPath: 'fdev', port: 7509, exec }).get('ID')
-  assert.equal(res.found, false)
+  const n = createFdevNode({ fdevPath: 'fdev', port: 7509, exec })
+  await assert.rejects(() => n.get('ID'), /no state|unexpected|exit 0/i)
 })
 
 test('a timed-out GET is distinguished from a miss and explains why it is slow', async () => {
@@ -316,4 +320,13 @@ test('a probe treats an unreachable node as an error, so DEV-2 cannot mass-creat
   const { exec } = fakeExec([{ code: 1, stderr: 'Error: failed to connect to the host(ws://x): Connection refused' }])
   const n = createFdevNode({ fdevPath: 'fdev', port: 7509, exec })
   await assert.rejects(() => n.probe('ID'), /could not reach|connect/i)
+})
+
+test('only fdev\'s explicit missing-contract wording counts as absence', async () => {
+  // A vague "not found" from somewhere else in the stack is not proof that a
+  // contract is absent; broad matching here is how an operational failure
+  // becomes a phantom "nothing is published".
+  const { exec } = fakeExec([{ code: 1, stderr: 'Error: config file not found' }])
+  const n = createFdevNode({ fdevPath: 'fdev', port: 7509, exec })
+  await assert.rejects(() => n.get('ID'), /config file not found/)
 })

@@ -49,7 +49,7 @@ const seconds = (ms) => `${Math.round(ms / 1000)}s`
  * Treating an unreachable node as "absent" is the dangerous direction: the
  * publish flow would conclude no index exists and start creating them.
  */
-const ABSENT_RE = /missing contract|contract not found|not found/i
+const ABSENT_RE = /missing contract|contract not found/i
 const UNREACHABLE_RE = /failed to connect to the host|connection refused|connection reset|no route to host|broken pipe/i
 
 const FDEV_TIMEOUT_GRACE_MS = 10_000
@@ -203,11 +203,16 @@ export function createFdevNode({
           )
         }
         // Only an explicit absence counts as absence. Anything else is an
-        // operational failure and is surfaced rather than silently swallowed.
-        if (res.code !== 0 && !ABSENT_RE.test(stderr)) {
+        // operational failure and is surfaced rather than silently swallowed —
+        // including exit 0 with nothing written, which fdev never does for a
+        // real miss (a miss is exit 1 plus "missing contract", verified
+        // against 0.3.274). Guessing "absent" is the dangerous guess: it is
+        // what licenses the publish flow to start creating index contracts.
+        if (!ABSENT_RE.test(stderr)) {
           throw new Error(
-            `fdev GET of ${id} failed (exit ${res.code}) on 127.0.0.1:${port}:\n` +
-            tail(stderr, 5).split('\n').map(l => `  ${l}`).join('\n'),
+            `fdev GET of ${id} returned no state on 127.0.0.1:${port} ` +
+            `(exit ${res.code ?? 'unknown'}), without reporting the contract as missing:\n` +
+            (tail(stderr, 5) || '  (no output)').split('\n').map(l => `  ${l.trim()}`).join('\n'),
           )
         }
         return {
