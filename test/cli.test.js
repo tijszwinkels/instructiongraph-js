@@ -875,4 +875,234 @@ describe('CLI', () => {
       await access(localPath)
     })
   })
+
+  describe('ig update', () => {
+    const GENESIS = 'AxyU5_5vWmP2tO_klN4UpbZzRsuJEvJTrdwdg_gODxZJ'
+    const linkRef = (n) => `${GENESIS}.${String(n).repeat(8)}-${String(n).repeat(4)}-4${String(n).repeat(3)}-8${String(n).repeat(3)}-${String(n).repeat(12)}`
+
+    /** A fully-populated object: several top-level fields and two relation arrays. */
+    const richSpec = (id) => ({
+      type: 'WIKI_PAGE',
+      id,
+      in: ['dataverse001'],
+      name: 'Master index',
+      instruction: 'Display the index; follow references to reach the pages.',
+      content: { title: 'Index', body: 'body text', meta: { author: 'Alice', version: 1 } },
+      relations: {
+        in_wiki: [{ ref: linkRef(1) }],
+        references: [{ ref: linkRef(2) }, { ref: linkRef(3) }],
+      },
+    })
+
+    /** Create a rich object via `ig create` and return its ref. */
+    async function seed(slug, id) {
+      const specPath = join(projectDir, `${slug}-spec.json`)
+      await writeFile(specPath, JSON.stringify(richSpec(id)))
+      const { stdout } = await ig('create', specPath)
+      return stdout.trim().split('\n').pop()
+    }
+
+    /** Write a patch file; `patch` may be an object or raw text. */
+    async function patchFile(slug, patch) {
+      const p = join(projectDir, `${slug}-patch.json`)
+      await writeFile(p, typeof patch === 'string' ? patch : JSON.stringify(patch))
+      return p
+    }
+
+    it('merges one nested content field, leaving every other field intact', async () => {
+      const ref = await seed('upd-merge', 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa')
+      const before = stored.get(ref)
+      const p = await patchFile('upd-merge', { content: { meta: { version: 2 } } })
+
+      const { stdout } = await ig('update', ref, p)
+      assert.equal(stdout.trim().split('\n').pop(), ref, 'prints the ref')
+
+      const after = stored.get(ref)
+      assert.equal(after.item.type, 'WIKI_PAGE', 'type preserved')
+      assert.equal(after.item.name, 'Master index', 'name preserved')
+      assert.equal(after.item.instruction, before.item.instruction, 'instruction preserved')
+      assert.deepEqual(after.item.in, ['dataverse001'], 'realm preserved')
+      assert.equal(after.item.content.title, 'Index', 'sibling content field preserved')
+      assert.equal(after.item.content.body, 'body text', 'sibling content field preserved')
+      assert.equal(after.item.content.meta.author, 'Alice', 'nested sibling preserved')
+      assert.equal(after.item.content.meta.version, 2, 'patched field applied')
+      assert.equal(after.item.relations.references.length, 2, 'untouched relation array intact')
+      assert.equal(after.item.relations.in_wiki.length, 1, 'untouched relation intact')
+      assert.ok(after.item.relations.author, 'author relation intact')
+
+      assert.equal(after.item.id, before.item.id, 'id immutable')
+      assert.equal(after.item.pubkey, before.item.pubkey, 'pubkey immutable')
+      assert.equal(after.item.created_at, before.item.created_at, 'created_at immutable')
+      assert.equal(after.item.revision, 1, 'revision bumped')
+      assert.ok(after.item.updated_at, 'updated_at set')
+      assert.ok(await verify(after.item.pubkey, after.signature, after.item), 'valid signature')
+    })
+
+    it('replaces arrays wholesale, leaving sibling relations untouched', async () => {
+      const ref = await seed('upd-array', 'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb')
+      const p = await patchFile('upd-array', { relations: { references: [{ ref: linkRef(9) }] } })
+
+      await ig('update', ref, p)
+
+      const after = stored.get(ref)
+      assert.equal(after.item.relations.references.length, 1, 'array replaced, not concatenated')
+      assert.equal(after.item.relations.references[0].ref, linkRef(9))
+      assert.equal(after.item.relations.in_wiki.length, 1, 'sibling relation untouched')
+      assert.ok(after.item.relations.author, 'author relation untouched')
+      assert.equal(after.item.content.title, 'Index', 'content untouched')
+    })
+
+    it('unwraps an `ig get` envelope used as a patch', async () => {
+      const ref = await seed('upd-envelope', 'cccccccc-cccc-4ccc-8ccc-cccccccccccc')
+      const envelope = structuredClone(stored.get(ref))
+      envelope.item.content.title = 'Retitled'
+      const p = await patchFile('upd-envelope', envelope)
+
+      const { stderr } = await ig('update', ref, p)
+      assert.match(stderr, /unwrapping/i, 'warns that it unwrapped the envelope')
+
+      const after = stored.get(ref)
+      assert.equal(after.item.content.title, 'Retitled')
+      assert.equal(after.item.is, undefined, 'envelope wrapper not merged into the item')
+      assert.equal(after.item.item, undefined, 'envelope wrapper not merged into the item')
+      assert.equal(after.item.revision, 1)
+    })
+
+    it('fails clearly when the patch file is missing', async () => {
+      const ref = await seed('upd-missing', 'dddddddd-dddd-4ddd-8ddd-dddddddddddd')
+      await assert.rejects(
+        ig('update', ref, join(projectDir, 'no-such-patch.json')),
+        err => /patch file not found/i.test(err.stderr)
+      )
+    })
+
+    it('fails clearly when the patch file is not valid JSON', async () => {
+      const ref = await seed('upd-bad-json', 'eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee')
+      const p = await patchFile('upd-bad-json', '{ "content": ')
+      await assert.rejects(
+        ig('update', ref, p),
+        err => /not valid json/i.test(err.stderr)
+      )
+    })
+
+    it('rejects a patch that is not a JSON object', async () => {
+      const ref = await seed('upd-not-object', 'ffffffff-ffff-4fff-8fff-ffffffffffff')
+      const p = await patchFile('upd-not-object', [{ content: { title: 'nope' } }])
+      await assert.rejects(
+        ig('update', ref, p),
+        err => /must be a json object/i.test(err.stderr)
+      )
+    })
+
+    it('fails when the object does not exist', async () => {
+      const p = await patchFile('upd-absent', { content: { title: 'x' } })
+      await assert.rejects(
+        ig('update', `${GENESIS}.99999999-9999-4999-8999-999999999999`, p),
+        err => /not found/i.test(err.stderr)
+      )
+    })
+
+    it("refuses to update someone else's object", async () => {
+      const ref = await seed('upd-foreign', '12121212-1212-4121-8121-121212121212')
+      const p = await patchFile('upd-foreign', { content: { title: 'hijacked' } })
+      await assert.rejects(
+        ig('update', ref, p, '--identity', 'alt'),
+        err => /only update your own objects/i.test(err.stderr)
+      )
+      assert.equal(stored.get(ref).item.content.title, 'Index', 'object unchanged')
+    })
+
+    it('requires both a ref and a patch file', async () => {
+      await assert.rejects(
+        ig('update', `${GENESIS}.99999999-9999-4999-8999-999999999999`),
+        err => /Usage: ig update/.test(err.stderr)
+      )
+    })
+
+    it('--no-push updates locally without touching the hub', async () => {
+      const freshDir = await mkdtemp(join(tmpdir(), 'ig-update-nopush-'))
+      const igDir = join(freshDir, '.instructionGraph')
+      await mkdir(join(igDir, 'config'), { recursive: true })
+      await mkdir(join(igDir, 'data'), { recursive: true })
+      await mkdir(join(igDir, 'identities', 'default'), { recursive: true })
+      await writeFile(join(igDir, 'config', 'hub-url'), hub.url)
+      await writeFile(join(igDir, 'config', 'active-identity'), 'default')
+      const pem = generateKeyPairSync('ec', { namedCurve: 'prime256v1' })
+        .privateKey.export({ format: 'pem', type: 'pkcs8' }).toString()
+      await writeFile(join(igDir, 'identities', 'default', 'private.pem'), pem)
+
+      const igFresh = (...a) => execFile('node', [CLI, ...a], {
+        cwd: freshDir,
+        env: { ...process.env, INSTRUCTIONGRAPH_DIR: igDir }
+      })
+
+      const specPath = join(freshDir, 'nopush-spec.json')
+      await writeFile(specPath, JSON.stringify({ type: 'NOTE', in: ['dataverse001'], content: { text: 'v1', keep: 'me' } }))
+      const { stdout: out1 } = await igFresh('create', specPath, '--no-push')
+      const ref = out1.trim().split('\n').pop()
+
+      const hubSizeBefore = stored.size
+      const p = join(freshDir, 'nopush-patch.json')
+      await writeFile(p, JSON.stringify({ content: { text: 'v2' } }))
+      await igFresh('update', ref, p, '--no-push')
+
+      assert.equal(stored.size, hubSizeBefore, 'hub untouched')
+      assert.equal(stored.has(ref), false, 'object never reached the hub')
+
+      const local = JSON.parse(await readFile(join(igDir, 'data', `${ref}.json`), 'utf-8'))
+      assert.equal(local.item.content.text, 'v2', 'patch applied locally')
+      assert.equal(local.item.content.keep, 'me', 'sibling field preserved')
+      assert.equal(local.item.revision, 1, 'revision bumped')
+
+      await rm(freshDir, { recursive: true })
+    })
+
+    it('--push updates a private identity-realm object on the hub', async () => {
+      const freshDir = await mkdtemp(join(tmpdir(), 'ig-update-private-'))
+      const igDir = join(freshDir, '.instructionGraph')
+      await mkdir(join(igDir, 'config'), { recursive: true })
+      await mkdir(join(igDir, 'data'), { recursive: true })
+      await mkdir(join(igDir, 'identities', 'default'), { recursive: true })
+      await writeFile(join(igDir, 'config', 'hub-url'), hub.url)
+      await writeFile(join(igDir, 'config', 'active-identity'), 'default')
+      const pem = generateKeyPairSync('ec', { namedCurve: 'prime256v1' })
+        .privateKey.export({ format: 'pem', type: 'pkcs8' }).toString()
+      await writeFile(join(igDir, 'identities', 'default', 'private.pem'), pem)
+
+      const igFresh = (...a) => execFile('node', [CLI, ...a], {
+        cwd: freshDir,
+        env: { ...process.env, INSTRUCTIONGRAPH_DIR: igDir }
+      })
+
+      // No `in` → lands in the signer's identity realm (private)
+      const specPath = join(freshDir, 'private-spec.json')
+      await writeFile(specPath, JSON.stringify({ type: 'NOTE', content: { text: 'secret v1', keep: 'me' } }))
+      const { stdout: out1 } = await igFresh('create', specPath, '--push')
+      const ref = out1.trim().split('\n').pop()
+      const pubkey = ref.split('.')[0]
+      assert.deepEqual(stored.get(ref).item.in, [pubkey], 'object is in its identity realm')
+
+      const p = join(freshDir, 'private-patch.json')
+      await writeFile(p, JSON.stringify({ content: { text: 'secret v2' } }))
+      await igFresh('update', ref, p, '--push')
+
+      const after = stored.get(ref)
+      assert.equal(after.item.content.text, 'secret v2', 'patch pushed to hub')
+      assert.equal(after.item.content.keep, 'me', 'sibling field preserved')
+      assert.equal(after.item.revision, 1, 'revision bumped')
+      assert.ok(await verify(after.item.pubkey, after.signature, after.item), 'valid signature')
+
+      await rm(freshDir, { recursive: true })
+    })
+
+    it('is documented in general and command help', async () => {
+      const { stdout: general } = await ig('--help')
+      assert.match(general, /ig update <ref> <patch\.json>/, 'listed in general usage')
+
+      const { stdout: cmdHelp } = await ig('update', '--help')
+      assert.match(cmdHelp, /Usage: ig update <ref> <patch\.json>/)
+      assert.match(cmdHelp, /deep-merge/i, 'explains deep merge')
+      assert.match(cmdHelp, /arrays are replaced/i, 'documents array replacement')
+    })
+  })
 })

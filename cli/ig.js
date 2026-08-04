@@ -118,6 +118,7 @@ Commands:
   ig verify <file.json>            Verify signature
   ig sign <spec.json> [--identity N]  Sign spec, print envelope
   ig create <spec.json> [options]  Sign and publish
+  ig update <ref> <patch.json>     Deep-merge a partial patch into an object
   ig identity                      Show current identity
   ig identity generate [--name N]  Generate a new identity
                        [--project]  Use ./.instructionGraph instead of ~/
@@ -152,6 +153,37 @@ function commandUsage(command) {
     verify: `Usage: ig verify <file.json>\n\nVerify an instructionGraph001 envelope on disk.`,
     sign: `Usage: ig sign <spec.json> [--identity N]\n\nBuild and sign a spec, then print the canonical envelope JSON.\n\nFlags:\n  --identity N  Sign with identity N instead of active identity`,
     create: `Usage: ig create <spec.json> [--update] [--identity N] [--realm R] [--push] [--no-push]\n\nBuild, sign, and publish a spec to the configured store.\n\nSpec format (JSON):\n  All fields are optional. Auto-filled: id, pubkey, ref, in, created_at,\n  relations.author. Recommended:\n    type         Object type (e.g. POST, NOTE, COMMENT)\n    name         Short human-readable label\n    instruction  How agents should interpret/display this object\n    content      Free-form payload (e.g. { "title": "...", "body": "..." })\n  Other fields:\n    id           UUID (auto-generated if omitted)\n    in           Realm array (default: your active realm)\n    relations    Named arrays of { ref } links to other objects\n    rights       { license, ai_training_allowed }\n\n  The instruction field is key — it makes objects self-describing so any\n  agent (human or LLM) can understand them without external docs.\n\n  If using a type, add a type_def relation so the schema is validated:\n    "relations": { "type_def": [{ "ref": "<pubkey>.<type-uuid>" }] }\n\n  Structural objects should include a root relation for discoverability:\n    "relations": { "root": [{ "ref": "AxyU5_...00000000-...",\n      "url": "https://dataverse001.net/AxyU5_...00000000-..." }] }\n\nExample:\n  {\n    "type": "POST",\n    "name": "Hello",\n    "instruction": "A post. Display title and body.",\n    "content": { "title": "Hello!", "body": "First post!" }\n  }\n\nFlags:\n  --update      Allow updating existing objects (auto-increments revision,\n                sets updated_at). Without this, fails if object exists.\n  --identity N  Sign with identity N instead of active identity\n  --realm R     Override default realm (e.g. dataverse001, identity)\n  --push        Push to server (auto-login if needed for identity realm)\n  --no-push     Store locally only, skip server push`,
+
+    update: `Usage: ig update <ref> <patch.json> [--identity N] [--push] [--no-push]
+
+Deep-merge a partial patch into an existing object and publish the result.
+
+Unlike 'ig create --update' — which full-replaces the object from the spec, so
+every field the spec omits is DROPPED — 'ig update' carries over every field
+you do not mention. Use this for partial edits.
+
+Merge semantics:
+  - Nested objects merge recursively: patching content.meta.version leaves
+    content.title and content.meta.author alone.
+  - Arrays are replaced wholesale, never concatenated or merged element-wise.
+    Patching relations.references swaps out that one array and leaves sibling
+    relations (in_wiki, type_def, author, ...) untouched.
+  - Immutable fields are always preserved: id, ref, pubkey, created_at.
+  - revision is auto-incremented; updated_at is set to now.
+  - The result is validated against its TYPE schema (via the type_def relation)
+    before it is signed.
+
+The patch is a JSON object holding only the fields you want to change:
+  { "content": { "meta": { "version": 2 } } }
+
+A full 'ig get' envelope is also accepted and unwrapped, so you can round-trip:
+  ig get <ref> > patch.json   # edit it, then:
+  ig update <ref> patch.json
+
+Flags:
+  --identity N  Sign with identity N instead of active identity
+  --push        Require the hub push to succeed (auto-login for identity realm)
+  --no-push     Read and write the local store only, never touch the hub`,
 
     identity: `Usage: ig identity [generate|activate|list] [options]\n\nShow or manage the active identity.\n\nFlags:\n  --identity N  Show info for identity N instead of the active one\n\nSubcommands:\n  ig identity generate [--name N] [--project] [--activate]\n  ig identity activate <name>\n  ig identity list\n\nEnvironment:\n  INSTRUCTIONGRAPH_DIR  Override config directory location`,
     server: `Usage: ig server [set <url> | login | logout | remove | push]\n\nShow, configure, or remove the hub server connection.\n\nSubcommands:\n  ig server              Show current server status and auth\n  ig server set <url>    Connect to a hub server for sync\n  ig server login        Log in with your active identity\n  ig server logout       Log out from the hub\n  ig server remove       Disconnect and go offline\n  ig server push [--all]  Push local objects (default: your realms only)\n\nWithout a server, all data stays on local filesystem only.\nWith a server, objects sync between local storage and the hub.\nLogin uses your active identity (see ig identity).`,
@@ -1013,6 +1045,67 @@ async function main() {
         // Normal path: client.create handles existence check + update logic
         const ref = await ctx.client.create(spec, { allowUpdate, requirePush: forcePush })
         console.log(ref)
+      }
+      break
+    }
+
+    case 'update': {
+      validateFlags('update', args.slice(1), {
+        booleanFlags: ['no-push', 'push'],
+        valueFlags: ['identity']
+      })
+      const [rawRef, file] = positionals(args.slice(1), ['identity'])
+      if (!rawRef || !file) die('Usage: ig update <ref> <patch.json> [--identity N] [--push | --no-push]')
+
+      const noPush = args.includes('--no-push')
+      const forcePush = args.includes('--push')
+      if (forcePush && noPush) die('Cannot use both --push and --no-push')
+
+      const patchPath = resolve(file)
+      if (!existsSync(patchPath)) die(`Patch file not found: ${patchPath}`)
+      let patch
+      try {
+        patch = JSON.parse(readFileSync(patchPath, 'utf-8'))
+      } catch (e) {
+        die(`Patch file is not valid JSON (${patchPath}): ${e.message}`)
+      }
+
+      // Accept a wrapped envelope (e.g. straight from `ig get`) — merging it as-is
+      // would graft `is`/`signature`/`item` onto the object itself.
+      if (patch && patch.is === 'instructionGraph001' && patch.item && typeof patch.item === 'object') {
+        console.error('Detected wrapped envelope — unwrapping to flat patch fields.')
+        const { pubkey: _pk, ref: _ref, signature: _sig, ...inner } = patch.item
+        patch = inner
+      }
+
+      if (patch === null || typeof patch !== 'object' || Array.isArray(patch)) {
+        die(`Patch must be a JSON object of the fields to change, e.g. { "content": { "title": "New" } } (got ${Array.isArray(patch) ? 'an array' : typeof patch})`)
+      }
+
+      const identityName = flag('identity')
+      // Reading a private object and writing it back both need a hub session,
+      // and the object's realm is only known after the fetch — so authenticate
+      // up-front whenever we have an identity and a hub (as `ig git clone` does).
+      const hasIdentity = !!(identityName || resolveIdentityConfig(findConfigDir()))
+      const ctx = await makeClient({
+        identityName,
+        localOnly: noPush,
+        authenticate: hasIdentity && !noPush,
+      })
+      printStatus(ctx)
+
+      if (forcePush && !ctx.isOnline) {
+        die('Cannot push — no server configured. Run \'ig server set <url>\' first.')
+      }
+
+      const ref = rawRef.replace(/^ig::/, '')
+      try {
+        console.log(await ctx.client.update(ref, patch, { requirePush: forcePush }))
+      } catch (e) {
+        if (noPush && /not found/i.test(e.message)) {
+          die(`${e.message}\nWith --no-push only the local store is consulted; drop --no-push to fetch it from the hub.`)
+        }
+        die(e.message)
       }
       break
     }

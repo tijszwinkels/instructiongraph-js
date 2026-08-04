@@ -84,7 +84,8 @@ ig search [--type T] [--by PK]  # Search objects
 ig inbound <ref> [--relation R]  # Inbound relations
 ig verify <file.json>            # Verify signature
 ig sign <spec.json>              # Sign spec, print envelope
-ig create <spec.json>            # Sign and publish
+ig create <spec.json>            # Sign and publish (--update = full replace)
+ig update <ref> <patch.json>     # Deep-merge a partial patch into an object
 ig auth                          # Hub authentication
 ig identity                      # Show current identity
 ig identity generate [--name N]  # Generate new identity
