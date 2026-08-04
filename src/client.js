@@ -247,7 +247,19 @@ export function createClient(opts = {}) {
 
     // ─── Update (fetch + merge + sign + publish) ───
 
-    async update(ref, patch) {
+    /**
+     * Patch an existing object: deep-merge `patch` into the current revision.
+     *
+     * Unlike client.create(spec, { allowUpdate }) which full-replaces from the
+     * spec, every field the patch omits is carried over untouched. Arrays are
+     * replaced wholesale (see deepMerge).
+     *
+     * @param {string} ref
+     * @param {object|((item: object) => object)} patch - partial fields, or a mutator callback
+     * @param {object} [opts]
+     * @param {boolean} [opts.requirePush] - fail if the hub leg of the publish did not succeed
+     */
+    async update(ref, patch, opts = {}) {
       requireIdentity()
       const current = await store.get(ref)
       if (!current?.item) throw new Error(`Object not found: ${ref}`)
@@ -277,6 +289,9 @@ export function createClient(opts = {}) {
       const signed = await client.sign(updated)
       const result = await client.publish(signed)
       if (!result.ok) throw new Error(`Publish failed: ${result.error || `status ${result.status}`}`)
+      if (opts.requirePush && result._remoteOk === false) {
+        throw new Error(`Hub push failed: ${result._remoteError || 'unknown error'}`)
+      }
       return signed.item.ref
     },
 

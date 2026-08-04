@@ -259,6 +259,29 @@ describe('client', () => {
       assert.equal(updated.item.pubkey, ig.pubkey)
       assert.equal(updated.item.created_at, original.item.created_at)
     })
+
+    it('requirePush surfaces a failed hub push', async () => {
+      const store = createMockStore()
+      const ig = createClient({
+        store,
+        identity: { type: 'credentials', username: 'merge-test', password: 'merge-test-pw' }
+      })
+      await ig.ready
+
+      const ref = await ig.create({ type: 'POST', content: { title: 'Original' } })
+
+      // Sync store reports a failed remote leg as _remoteOk: false on an otherwise-ok put
+      const localPut = store.put
+      store.put = async (obj) => ({ ...(await localPut(obj)), _remoteOk: false, _remoteError: 'hub said no' })
+
+      await assert.rejects(
+        () => ig.update(ref, { content: { title: 'Patched' } }, { requirePush: true }),
+        /Hub push failed: hub said no/
+      )
+      // Without requirePush the local write still succeeds
+      await ig.update(ref, { content: { title: 'Patched' } })
+      assert.equal((await store.get(ref)).item.content.title, 'Patched')
+    })
   })
 
   describe('createIdentity with PEM persistence', () => {

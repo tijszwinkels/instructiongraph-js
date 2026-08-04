@@ -154,11 +154,14 @@ export function listIdentityNames(configDir) {
  * @param {string} [overrides.token] - Override the auth token
  * @param {boolean} [overrides.authenticate] - Authenticate with hub on connect
  * @param {boolean} [overrides.skipRealmCheck] - Disable realm filtering (--raw)
+ * @param {boolean} [overrides.localOnly] - Ignore any configured hub; filesystem store only (--no-push)
  * @returns {Promise<{client, configDir, isOnline, hubUrl, hub, store}>}
  */
 export async function openRuntime(overrides = {}) {
   const configDir = findConfigDir()
-  const hubUrl = readConfig(configDir, 'hub-url', null)  // null = no server configured
+  // localOnly (--no-push) pretends no server is configured, so reads and writes
+  // both stay on the filesystem store.
+  const hubUrl = overrides.localOnly ? null : readConfig(configDir, 'hub-url', null)  // null = no server configured
   const defaultRealm = overrides.realm || readConfig(configDir, 'default-realm', null)
   const dataDir = join(configDir, 'data')
   const hasLocal = existsSync(dataDir)
@@ -189,10 +192,10 @@ export async function openRuntime(overrides = {}) {
   // If realm is 'local', ensure data dir exists — local realm objects must never
   // go through hub-only mode, which would bypass the sync store's push guard.
   const effectiveRealm = overrides.realm || readConfig(configDir, 'default-realm', null)
-  if ((effectiveRealm === 'local' || effectiveRealm === 'server-public') && !hasLocal) {
+  if ((overrides.localOnly || effectiveRealm === 'local' || effectiveRealm === 'server-public') && !hasLocal) {
     mkdirSync(dataDir, { recursive: true })
   }
-  const hasLocalResolved = hasLocal || effectiveRealm === 'local' || effectiveRealm === 'server-public'
+  const hasLocalResolved = hasLocal || !!overrides.localOnly || effectiveRealm === 'local' || effectiveRealm === 'server-public'
 
   if (hubUrl && hasLocalResolved) {
     // Both: sync store (local primary, hub sync)
