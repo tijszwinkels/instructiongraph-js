@@ -70,20 +70,20 @@ function makeObj(ref, revision = 0, realms = ['dataverse001']) {
 }
 
 describe('sync store', () => {
-  describe('get: hub-first with ETag', () => {
-    it('sends localRevision to hub for ETag', async () => {
+  describe('get: hub-first with item comparison', () => {
+    it('does not use revision-only ETags to validate independently edited objects', async () => {
       const local = createMockStore({ 'pk.1': makeObj('pk.1', 3) })
       const remote = createMockHubStore({ 'pk.1': makeObj('pk.1', 3) })
       const sync = createSyncStore({ local, remote })
 
       const obj = await sync.get('pk.1')
       assert.equal(obj.item.revision, 3)
-      // Hub should have received localRevision=3
+      // Matching revision numbers do not prove matching content.
       const hubGet = remote.calls.find(c => c.method === 'get')
-      assert.equal(hubGet.opts.localRevision, 3)
+      assert.equal(hubGet.opts.localRevision, undefined)
     })
 
-    it('returns local on 304 (not modified)', async () => {
+    it('returns the existing local object when signed items match', async () => {
       const localObj = makeObj('pk.1', 5)
       const local = createMockStore({ 'pk.1': localObj })
       const remote = createMockHubStore({ 'pk.1': makeObj('pk.1', 5) }) // same rev → 304

@@ -112,7 +112,7 @@ Usage:
 
 Commands:
   ig status                        Show full configuration status
-  ig get <ref> [--identity N]      Fetch object (auth as identity for private)
+  ig get <ref> [--local|--remote]  Fetch object (add --identity N for private)
   ig search [--identity N] [opts]  Search objects
   ig inbound <ref> [--identity N]  Inbound relations
   ig verify <file.json>            Verify signature
@@ -146,7 +146,7 @@ Run 'ig <command> --help' for command-specific help.`)
 
 function commandUsage(command) {
   const docs = {
-    get: `Usage: ig get <ref> [--identity N] [--raw]\n\nFetch an object by ref and print its JSON envelope.\n\nFlags:\n  --identity N  Authenticate as identity N to access private objects\n  --raw         Skip realm filtering (show objects from any realm)`,
+    get: `Usage: ig get <ref> [--identity N] [--raw] [--local|--remote]\n\nFetch an object by ref and print its JSON envelope.\nUse --local or --remote to inspect a conflict without synchronizing.\n\nFlags:\n  --identity N  Authenticate as identity N to access private objects\n  --raw         Skip realm filtering (show objects from any realm)\n  --local       Read only the local copy\n  --remote      Read only the configured hub`,
     search: `Usage: ig search [--type T] [--by PK] [--limit N] [--cursor C] [--identity N] [--counts] [--jsonl] [--raw] [--local] [--remote]\n\nSearch objects on the configured hub/store.\n\nFlags:\n  --type T      Filter by object type\n  --by PK       Filter by pubkey\n  --limit N     Max results (default: 20)\n  --cursor C    Pagination cursor from previous result\n  --identity N  Authenticate as identity N to access private objects\n  --counts      Include inbound relation counts\n  --jsonl       Output one JSON envelope per line (JSONL)\n  --raw         Skip realm filtering (show objects from any realm)\n  --local       Search local store only (skip hub)\n  --remote      Search hub only (skip local)`,
     inbound: `Usage: ig inbound <ref> [--relation R] [--type T] [--from PK] [--limit N] [--cursor C] [--identity N] [--counts] [--jsonl] [--raw] [--local] [--remote]\n\nList objects that point to the target ref.\n\nFlags:\n  --relation R  Filter by relation name\n  --type T      Filter by source object type\n  --from PK     Filter by source object pubkey\n  --limit N     Max results (default: 20)\n  --cursor C    Pagination cursor from previous result\n  --identity N  Authenticate as identity N to access private objects\n  --counts      Include inbound relation counts\n  --jsonl       Output one JSON envelope per line (JSONL)\n  --raw         Skip realm filtering (show objects from any realm)\n  --local       Search local store only (skip hub)\n  --remote      Search hub only (skip local)`,
     verify: `Usage: ig verify <file.json>\n\nVerify an instructionGraph001 envelope on disk.`,
@@ -625,6 +625,7 @@ async function serverPush() {
   if (result.errors) parts.push(`${result.errors} errors`)
   parts.push(`${result.total} total`)
   console.log(`Done. ${parts.join(', ')}.`)
+  if (result.errors) process.exitCode = 1
 }
 
 function removeServer() {
@@ -775,14 +776,19 @@ async function main() {
     }
 
     case 'get': {
-      validateFlags('get', args.slice(1), { booleanFlags: ['raw'], valueFlags: ['identity'] })
+      validateFlags('get', args.slice(1), { booleanFlags: ['raw', 'local', 'remote'], valueFlags: ['identity'] })
       const [ref] = positionals(args.slice(1), ['identity'])
       if (!ref) die('Usage: ig get <ref>')
 
       const identityName = flag('identity')
       const raw = args.includes('--raw')
-      const ctx = await makeClient({ identityName, authenticate: !!identityName, skipRealmCheck: raw })
-      const obj = await ctx.client.get(ref)
+      const wantLocal = args.includes('--local')
+      const wantRemote = args.includes('--remote')
+      if (wantLocal && wantRemote) die('Choose either --local or --remote')
+      const ctx = await makeClient({ identityName, authenticate: !!identityName && !wantLocal, skipRealmCheck: raw })
+      if (wantRemote && !ctx.isOnline) die('--remote requires a server')
+      if (wantLocal && ctx.isOnline && !ctx.store.setRealmContext) die('--local requires a local data directory')
+      const obj = await ctx.client.get(ref, { source: wantLocal ? 'local' : wantRemote ? 'remote' : 'both' })
       if (!obj) die(`Not found: ${ref}`)
       console.log(JSON.stringify(obj, null, 2))
       break
@@ -1006,7 +1012,8 @@ async function main() {
 
         await ctx.client.validateType(item)
         const signed = await ctx.client.sign(item)
-        await local.put(signed)
+        const result = await local.put(signed)
+        if (!result.ok) die(result.error || 'Local write failed')
         console.log('Stored locally (server push skipped)')
         console.log(signed.item.ref)
       } else {

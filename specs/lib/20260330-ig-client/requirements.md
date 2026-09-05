@@ -77,6 +77,10 @@
 - WHEN `createHubStore({ url })` is used THEN all reads/writes go to the hub via HTTP
 - WHEN `createFsStore({ dataDir })` is used THEN objects are stored as `{pubkey}.{id}.json` with canonical JSON and correct mtime
 - WHEN `createSyncStore({ local, remote })` is used THEN reads fetch from both and keep the newer revision, writes go to both
+- WHEN two copies have the same ref and revision but different signed items THEN combined reads report `REVISION_CONFLICT`; the filesystem store preserves the incoming candidate separately and retains the live local edit
+- WHEN signatures or unsigned envelope metadata differ but the signed items match THEN synchronization treats the copies as identical
+- WHEN a local write is rejected THEN sync does not publish it remotely; WHEN the hub rejects a write with 409/412 THEN sync reports failure while retaining the local edit
+- WHEN a TYPE lookup encounters a revision conflict THEN validation propagates the conflict instead of treating the schema as unavailable
 
 ### 7. Cross-compatibility with existing tools
 
@@ -99,6 +103,8 @@
 #### Acceptance Criteria
 
 - WHEN `ig get <ref>` is run THEN the object is fetched (sync-read) and printed as JSON
+- WHEN `ig get <ref> --local` or `--remote` is run THEN only the chosen store is read, without reconciling the two copies
+- WHEN `ig server push` encounters HTTP rejections THEN it counts those objects as errors and exits unsuccessfully
 - WHEN `ig sign <spec.json>` is run THEN the spec is signed and the envelope is printed
 - WHEN `ig create <spec.json>` is run THEN it signs and publishes, printing the ref
 - WHEN `ig search --type POST` is run THEN matching objects are listed

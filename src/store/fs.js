@@ -7,10 +7,12 @@
  * Supports cursor-based pagination for search/inbound.
  */
 
-import { readFileSync, writeFileSync, existsSync, mkdirSync, readdirSync, renameSync, utimesSync, unlinkSync } from 'node:fs'
+import { readFileSync, writeFileSync, existsSync, mkdirSync, readdirSync, renameSync, utimesSync, unlinkSync, openSync, closeSync, fsyncSync, linkSync } from 'node:fs'
 import { join } from 'node:path'
+import { createHash, randomUUID } from 'node:crypto'
 import { canonicalJSON } from '../canonical.js'
 import { verify } from '../crypto.js'
+import { sameItem, RevisionConflictError } from './conflict.js'
 
 // ─── Cursor helpers ──────────────────────────────────────────────
 
@@ -90,6 +92,30 @@ export function createFsStore({ dataDir, filter = null }) {
     renameSync(src, dst)
   }
 
+  function archiveConflict(obj) {
+    const hash = createHash('sha256').update(canonicalJSON(obj.item)).digest('hex')
+    const dir = join(dataDir, 'conflicts')
+    mkdirSync(dir, { recursive: true, mode: 0o700 })
+    const path = join(dir, `${hash}.json`)
+    const temporary = join(dir, `.conflict-${randomUUID()}`)
+    const fd = openSync(temporary, 'wx', 0o600)
+    try {
+      writeFileSync(fd, canonicalJSON(obj) + '\n')
+      fsyncSync(fd)
+      try {
+        linkSync(temporary, path)
+      } catch (error) {
+        if (error.code !== 'EEXIST') throw error
+        const saved = readObj(path)
+        if (!saved?.item || !sameItem(saved, obj)) throw error
+      }
+    } finally {
+      closeSync(fd)
+      unlinkSync(temporary)
+    }
+    return path
+  }
+
   /** Read and filter all envelopes, sorted newest-first. */
   function listAll() {
     const items = []
@@ -117,6 +143,14 @@ export function createFsStore({ dataDir, filter = null }) {
   }
 
   return {
+    /** Preserve a rejected candidate without replacing the current object. */
+    async preserveConflict(obj) {
+      if (!await verify(obj.item?.pubkey, obj.signature, obj.item)) {
+        throw new Error('Cannot preserve conflict: signature verification failed')
+      }
+      return archiveConflict(obj)
+    },
+
     async get(ref, opts = {}) {
       const obj = readObj(filePath(ref))
       if (obj && filter && !opts.skipRealmCheck && !filter(obj)) return null
@@ -147,8 +181,11 @@ export function createFsStore({ dataDir, filter = null }) {
           if (newRev < existingRev) {
             return { ok: false, error: `Existing revision ${existingRev} > incoming ${newRev}` }
           }
-          if (newRev === existingRev && canonicalJSON(existing) === canonicalJSON(signedObj)) {
-            return { ok: true } // identical, no-op
+          if (newRev === existingRev) {
+            if (sameItem(existing, signedObj)) return { ok: true }
+            const conflictPath = archiveConflict(signedObj)
+            const error = new RevisionConflictError(existing, signedObj, conflictPath)
+            return { ok: false, status: 409, code: error.code, error: error.message, conflictPath }
           }
           // Backup old version
           backup(ref, existingRev)
