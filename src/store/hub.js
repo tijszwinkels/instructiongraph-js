@@ -6,6 +6,7 @@
 
 import { canonicalJSON } from '../canonical.js'
 import { LOCAL_REALM } from './realm-filter.js'
+import { sameItem } from './conflict.js'
 
 /**
  * Create a hub store.
@@ -22,6 +23,12 @@ export function createHubStore({ url, token = null }) {
     const h = { Accept: 'application/json', ...extra }
     if (bearerToken) h.Authorization = `Bearer ${bearerToken}`
     return h
+  }
+
+  async function responseError(res, operation) {
+    const problem = await res.json().catch(() => null)
+    const detail = problem?.detail || problem?.error || `HTTP ${res.status}`
+    return Object.assign(new Error(`${operation}: ${detail}`), { status: res.status, code: problem?.code })
   }
 
   return {
@@ -53,7 +60,7 @@ export function createHubStore({ url, token = null }) {
       if (res.status === 304) return { _notModified: true }
       if (res.status === 404) return null
       if (!res.ok) {
-        throw new Error(`hub GET /${ref} failed: HTTP ${res.status}`)
+        throw await responseError(res, `hub GET /${ref} failed`)
       }
       return await res.json()
     },
@@ -74,7 +81,24 @@ export function createHubStore({ url, token = null }) {
           headers: headers({ 'Content-Type': 'application/json' }),
           body: canonicalJSON(signedObj)
         })
-        return { ok: res.ok || res.status === 201, status: res.status }
+        if (!res.ok) {
+          const error = await responseError(res, `hub PUT /${ref} failed`)
+          // Older hubs reject identical retries with 409. Confirm the actual
+          // item before acknowledging; a revision number alone is insufficient.
+          if (res.status === 409) {
+            try {
+              const check = await fetch(`${baseUrl}/${ref}`, { headers: headers() })
+              if (check.ok) {
+                const existing = await check.json()
+                if (existing?.item && sameItem(existing, signedObj)) return { ok: true, status: 200 }
+              } else {
+                await check.body?.cancel()
+              }
+            } catch { /* Keep the original rejection when confirmation fails. */ }
+          }
+          return { ok: false, status: error.status, code: error.code, error: error.message }
+        }
+        return { ok: true, status: res.status }
       } catch (e) {
         console.warn(`[hub] PUT /${ref} error: ${e.message}`)
         return { ok: false, error: e.message }
@@ -93,7 +117,7 @@ export function createHubStore({ url, token = null }) {
       const url = `${baseUrl}/search${qs ? '?' + qs : ''}`
       const res = await fetch(url, { headers: headers() })
       if (!res.ok) {
-        throw new Error(`hub search failed: HTTP ${res.status}`)
+        throw await responseError(res, 'hub search failed')
       }
       const data = await res.json()
       return {
@@ -115,7 +139,7 @@ export function createHubStore({ url, token = null }) {
       const url = `${baseUrl}/${ref}/inbound${qs ? '?' + qs : ''}`
       const res = await fetch(url, { headers: headers() })
       if (!res.ok) {
-        throw new Error(`hub inbound failed: HTTP ${res.status}`)
+        throw await responseError(res, 'hub inbound failed')
       }
       const data = await res.json()
       return {

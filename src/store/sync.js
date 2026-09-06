@@ -1,26 +1,27 @@
 /**
  * Sync store — combines local (fs) + remote (hub), follows hub proxy semantics.
  *
- * GET:  Hub first (with ETag from local revision). On 304, serve local.
+ * GET:  Hub first, comparing signed items as well as revision numbers.
  *       On 200, cache locally. On 404, serve local + push to hub.
- *       On hub error, fall back to local.
+ *       On connectivity errors, fall back to local; conflicts remain errors.
  *
- * PUT:  Write local first, then push to hub (non-fatal).
+ * PUT:  Write local first, then push to hub. Conflicts fail; offline edits stay local.
  *
- * SEARCH/INBOUND: Query both, merge results (dedup by ref, higher revision wins).
- *                 Cache all hub results locally.
+ * SEARCH/INBOUND: Merge by ref and revision; equal-revision divergence fails.
+ *                 Cache complete signed hub objects, never BLOB projections.
  */
 
 import { writeFileSync, mkdirSync } from 'node:fs'
 import { join } from 'node:path'
 import { isVisible, LOCAL_REALM, SERVER_PUBLIC_REALM } from './realm-filter.js'
+import { sameItem, isRevisionConflict, RevisionConflictError } from './conflict.js'
 
 /**
  * Create a sync store that mirrors hub proxy behavior.
  *
  * @param {object} opts
  * @param {import('../types.js').Store} opts.local  - filesystem store
- * @param {import('../types.js').Store} opts.remote - hub store (must support get(ref, {localRevision}))
+ * @param {import('../types.js').Store} opts.remote - hub store
  * @param {string} [opts.activePubkey] - active identity pubkey for realm filtering
  * @param {string[]} [opts.sharedRealms] - shared realm memberships (loaded from cache)
  * @param {string} [opts.configDir] - config directory for caching shared realms
@@ -79,24 +80,69 @@ export function createSyncStore({ local, remote, activePubkey = null, sharedReal
     return true
   }
 
-  /** Cache a single object locally (fire-and-forget, won't downgrade). */
-  function cacheLocally(obj) {
+  /** Await caching so conflicts and storage failures reach the caller. */
+  async function cacheLocally(obj) {
     if (!obj?.item?.ref) return
-    local.put(obj).catch(e => console.warn(`[sync] local cache failed: ${e.message}`))
+    const result = await local.put(obj)
+    if (!result.ok) {
+      if (result.code === 'REVISION_CONFLICT') {
+        throw new RevisionConflictError(await local.get(obj.item.ref), obj, result.conflictPath)
+      }
+      throw new Error(`Local cache failed for ${obj.item.ref}: ${result.error}`)
+    }
   }
 
   /** Push a single object to hub (fire-and-forget). Skips identity-realm objects when not authenticated. */
   function pushToRemote(obj) {
     if (!obj?.item?.ref) return
     if (!shouldPushToRemote(obj)) return
-    remote.put(obj).catch(e => console.warn(`[sync] remote push failed: ${e.message}`))
+    remote.put(obj).then(result => {
+      if (!result.ok) console.warn(`[sync] remote rejected ${obj.item.ref}: ${result.error || `HTTP ${result.status}`}; local edit retained`)
+    }).catch(e => console.warn(`[sync] remote push failed: ${e.message}`))
   }
 
-  /** Cache an array of objects locally (background, best-effort). */
-  function cacheItemsLocally(items) {
-    for (const obj of items) {
-      if (obj?.item?.ref) cacheLocally(obj)
+  async function checkConflict(localObj, incoming) {
+    if (localObj && (localObj.item.revision || 0) === (incoming.item.revision || 0) && !sameItem(localObj, incoming)) {
+      const path = await local.preserveConflict?.(incoming)
+      throw new RevisionConflictError(localObj, incoming, path)
     }
+  }
+
+  /** Use one reconciliation rule for search and inbound, including off-page local copies. */
+  async function mergeResults(localResult, remoteResult, opts) {
+    const byRef = new Map()
+    for (const incoming of remoteResult.items) {
+      const ref = incoming.item?.ref
+      if (!ref || !applyFilter(incoming, opts)) continue
+      const localObj = applyFilter(await local.get(ref), opts)
+      // Hub list responses omit BLOB data/text. They are projections, not
+      // independently verifiable envelopes, and must never replace cached data.
+      if (incoming.item.type === 'BLOB' && incoming.item.content &&
+          !('data' in incoming.item.content) && !('text' in incoming.item.content)) {
+        if (localObj && (localObj.item.revision || 0) === (incoming.item.revision || 0) &&
+            localObj.signature !== incoming.signature) {
+          const full = applyFilter(await remote.get(ref), opts)
+          if (!full) throw new Error(`Cannot compare BLOB revision for ${ref}: full object unavailable`)
+          await checkConflict(localObj, full)
+        }
+        if (!localObj || (incoming.item.revision || 0) >= (localObj.item.revision || 0)) byRef.set(ref, incoming)
+        continue
+      }
+      await checkConflict(localObj, incoming)
+      if (!localObj || (incoming.item.revision || 0) > (localObj.item.revision || 0)) {
+        await cacheLocally(incoming)
+        byRef.set(ref, incoming)
+      } else if (sameItem(localObj, incoming)) {
+        byRef.set(ref, { ...incoming, item: localObj.item, signature: localObj.signature })
+      }
+    }
+    for (const obj of localResult.items) {
+      const ref = obj.item?.ref
+      if (!ref || !applyFilter(obj, opts)) continue
+      const existing = byRef.get(ref)
+      if (!existing || (obj.item.revision || 0) > (existing.item.revision || 0)) byRef.set(ref, obj)
+    }
+    return { items: [...byRef.values()], cursor: remoteResult.cursor || localResult.cursor || null }
   }
 
   /** Apply realm filter to a result before returning to caller. */
@@ -108,17 +154,19 @@ export function createSyncStore({ local, remote, activePubkey = null, sharedReal
 
   return {
     async get(ref, opts = {}) {
-      // Internal reads skip realm check to get revision for ETag comparison.
-      // applyFilter() is called on every return path to enforce visibility.
+      if (opts.source === 'local') return applyFilter(await local.get(ref, opts), opts)
+      if (opts.source === 'remote') return applyFilter(await remote.get(ref), opts)
+      // Read the local candidate, then enforce visibility before comparison.
       let localObj = null
       try { localObj = await local.get(ref, { skipRealmCheck: true }) } catch { /* ok */ }
-      const localRev = localObj?.item?.revision
 
-      // Ask hub with ETag (conditional request)
+      // Revision-only ETags cannot distinguish independent edits at the same
+      // revision. Fetch the item until content-based validators are supported.
       let remoteResult = null
       try {
-        remoteResult = await remote.get(ref, { localRevision: localRev })
+        remoteResult = await remote.get(ref)
       } catch (e) {
+        if (isRevisionConflict(e)) throw e
         // Hub unreachable — fall back to local
         process.stderr.write(`⚠ Hub get failed: ${e.message} — using local copy\n`)
         return applyFilter(localObj, opts)
@@ -131,13 +179,17 @@ export function createSyncStore({ local, remote, activePubkey = null, sharedReal
 
       // Hub returned an object
       if (remoteResult?.item) {
+        localObj = applyFilter(localObj, opts)
+        remoteResult = applyFilter(remoteResult, opts)
+        if (!remoteResult) return localObj
+        await checkConflict(localObj, remoteResult)
         const remoteRev = remoteResult.item.revision || 0
 
         if (localObj) {
           const lRev = localObj.item?.revision || 0
           if (remoteRev > lRev) {
             // Hub is newer — cache locally
-            cacheLocally(remoteResult)
+            await cacheLocally(remoteResult)
             return applyFilter(remoteResult, opts)
           }
           if (lRev > remoteRev) {
@@ -150,7 +202,7 @@ export function createSyncStore({ local, remote, activePubkey = null, sharedReal
         }
 
         // Hub only — cache locally
-        cacheLocally(remoteResult)
+        await cacheLocally(remoteResult)
         return applyFilter(remoteResult, opts)
       }
 
@@ -166,6 +218,7 @@ export function createSyncStore({ local, remote, activePubkey = null, sharedReal
     async put(signedObj) {
       // Local first
       const localResult = await local.put(signedObj)
+      if (!localResult.ok) return { ...localResult, _remoteOk: false, _remoteError: 'Local write rejected; remote push skipped' }
 
       // Skip remote push for identity-realm objects when not authenticated
       if (!shouldPushToRemote(signedObj)) {
@@ -182,14 +235,19 @@ export function createSyncStore({ local, remote, activePubkey = null, sharedReal
       } catch (e) {
         const ref = signedObj.item?.ref || '?'
         process.stderr.write(`⚠ Hub push failed for ${ref}: ${e.message}\n`)
-        return { ...localResult, _remoteOk: false, _remoteError: e.message }
+        if (!isRevisionConflict(e)) return { ...localResult, _remoteOk: false, _remoteError: e.message }
+        remoteResult = { ok: false, status: e.status || 409, code: 'REVISION_CONFLICT', error: e.message }
       }
 
       if (remoteResult && !remoteResult.ok) {
         const ref = signedObj.item?.ref || '?'
         const reason = remoteResult.error || `HTTP ${remoteResult.status}`
         process.stderr.write(`⚠ Hub rejected ${ref}: ${reason}\n`)
-        return { ...localResult, _remoteOk: false, _remoteError: reason }
+        const conflict = isRevisionConflict(remoteResult)
+        return { ...localResult, ...(conflict ? {
+          ok: false, status: remoteResult.status, code: 'REVISION_CONFLICT',
+          error: `${reason}; local edit retained for ${ref}. Fetch both versions before resolving.`,
+        } : {}), _remoteOk: false, _remoteError: reason }
       }
 
       return { ...localResult, _remoteOk: true }
@@ -208,6 +266,7 @@ export function createSyncStore({ local, remote, activePubkey = null, sharedReal
         try {
           return await remote.search(_query)
         } catch (e) {
+          if (isRevisionConflict(e)) throw e
           throw new Error(`Hub search failed: ${e.message}`)
         }
       }
@@ -219,31 +278,13 @@ export function createSyncStore({ local, remote, activePubkey = null, sharedReal
           return { items: [], cursor: null }
         }),
         remote.search(_query).catch((e) => {
+          if (isRevisionConflict(e)) throw e
           process.stderr.write(`⚠ Hub search failed: ${e.message} — showing local results only\n`)
           return { items: [], cursor: null }
         })
       ])
 
-      // Cache hub results locally (background)
-      if (remoteResult.items.length > 0) {
-        cacheItemsLocally(remoteResult.items)
-      }
-
-      // Merge: dedup by ref, prefer higher revision
-      const byRef = new Map()
-      for (const item of [...remoteResult.items, ...localResult.items]) {
-        const ref = item.item?.ref
-        if (!ref) continue
-        const existing = byRef.get(ref)
-        if (!existing || (item.item.revision || 0) > (existing.item.revision || 0)) {
-          byRef.set(ref, item)
-        }
-      }
-
-      return {
-        items: Array.from(byRef.values()),
-        cursor: remoteResult.cursor || localResult.cursor || null
-      }
+      return mergeResults(localResult, remoteResult, _query)
     },
 
     /**
@@ -287,7 +328,8 @@ export function createSyncStore({ local, remote, activePubkey = null, sharedReal
         }
 
         try {
-          await remote.put(obj)
+          const result = await remote.put(obj)
+          if (!result.ok) throw new Error(result.error || `HTTP ${result.status}`)
           pushed++
           if (onProgress) onProgress({ ref, index: i, total, status: 'ok' })
         } catch (e) {
@@ -354,6 +396,7 @@ export function createSyncStore({ local, remote, activePubkey = null, sharedReal
         try {
           return await remote.inbound(ref, _opts)
         } catch (e) {
+          if (isRevisionConflict(e)) throw e
           throw new Error(`Hub inbound failed: ${e.message}`)
         }
       }
@@ -365,31 +408,13 @@ export function createSyncStore({ local, remote, activePubkey = null, sharedReal
           return { items: [], cursor: null }
         }),
         remote.inbound(ref, _opts).catch((e) => {
+          if (isRevisionConflict(e)) throw e
           process.stderr.write(`⚠ Hub inbound failed: ${e.message} — showing local results only\n`)
           return { items: [], cursor: null }
         })
       ])
 
-      // Cache hub results locally (background)
-      if (remoteResult.items.length > 0) {
-        cacheItemsLocally(remoteResult.items)
-      }
-
-      // Merge: dedup by ref, prefer higher revision
-      const byRef = new Map()
-      for (const item of [...remoteResult.items, ...localResult.items]) {
-        const itemRef = item.item?.ref
-        if (!itemRef) continue
-        const existing = byRef.get(itemRef)
-        if (!existing || (item.item.revision || 0) > (existing.item.revision || 0)) {
-          byRef.set(itemRef, item)
-        }
-      }
-
-      return {
-        items: Array.from(byRef.values()),
-        cursor: remoteResult.cursor || localResult.cursor || null
-      }
+      return mergeResults(localResult, remoteResult, _opts)
     }
   }
 }

@@ -79,7 +79,7 @@ const ref = await ig2.create({ type: 'POST', in: ['dataverse001'], content: { ti
 ## CLI Reference
 
 ```bash
-ig get <ref>                     # Fetch object
+ig get <ref> [--local|--remote]   # Fetch object; inspect one side without syncing
 ig search [--type T] [--by PK]  # Search objects
 ig inbound <ref> [--relation R]  # Inbound relations
 ig verify <file.json>            # Verify signature
@@ -201,12 +201,51 @@ const store = createFsStore({ dataDir: './.instructionGraph/data' })
 
 ### Sync Store
 
-Combines local filesystem + remote hub. Reads check the hub first (with ETag caching), writes go to both. Falls back to local when the hub is unreachable.
+Combines local filesystem + remote hub. Reads check the hub first and compare
+signed items; writes go to both. Falls back to local when the hub is unreachable.
+Revision-only ETags are not used for synchronization: independent offline edits
+can have the same revision number but different content.
 
 ```js
 import { createSyncStore } from '@instructiongraph/ig'
 const store = createSyncStore({ local: fsStore, remote: hubStore })
 ```
+
+### Revision conflicts
+
+Different signed items at the same ref and revision are explicit conflicts.
+`get`, combined `search`, and combined `inbound` throw `RevisionConflictError` for locally detected conflicts
+(`code: 'REVISION_CONFLICT'`) instead of silently selecting an edit. The error
+contains `local` and `incoming` envelopes. Re-signing the same item or changing
+unsigned metadata does not create a conflict.
+
+The filesystem store leaves the current object intact and saves the competing
+envelope in `data/conflicts/<item-sha256>.json`. `conflictPath` identifies it in
+the error or rejected `put` result. Archives use exclusive writes; distinct
+edits and retries cannot overwrite one another. Custom local stores can implement
+`preserveConflict(envelope) -> Promise<path>` for persistent preservation;
+otherwise callers must save the candidates attached to the exception themselves.
+
+To inspect a conflict, use `ig get <ref> --local` and `ig get <ref> --remote`
+(add `--identity` as needed). These reads do not synchronize either candidate.
+The corresponding library option is `store.get(ref, { source: 'local' | 'remote' })`.
+After comparing the edits, prepare a complete merged spec with the existing id
+and a revision higher than both candidates. Store it with
+`ig create <merged-spec.json> --update --no-push --identity <name> --realm <realm>`,
+then publish with `ig server push`. Retained conflict archives are recovery copies;
+they are not automatically deleted when a higher revision is written or tombstoned.
+
+An upstream 409/412 is a failed write even when the local edit was saved.
+Network failures remain local successes with `_remoteOk: false`. Bulk push counts
+HTTP rejections as errors and exits unsuccessfully. A 409 retry is acknowledged
+only after fetching and confirming that the hub already holds the same signed
+item. Conflicts reported by an upstream proxy are propagated, never treated as an
+offline-cache success. Those errors carry the upstream status/code; candidates
+archived on the proxy require recovery by its operator.
+
+These rules detect equal-revision forks; they do not infer edit ancestry or merge
+different revisions automatically. Freenet's transport-level winner selection
+is not an application-level conflict resolution policy.
 
 ## Identity Types
 

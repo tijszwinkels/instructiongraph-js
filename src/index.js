@@ -10,6 +10,7 @@ export { createClient } from './client.js'
 // Stores
 export { createHubStore } from './store/hub.js'
 export { createSyncStore } from './store/sync.js'
+export { RevisionConflictError } from './store/conflict.js'
 // fs store is Node-only, import separately: import { createFsStore } from '@instructiongraph/ig/store/fs'
 
 // Protocol primitives

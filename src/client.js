@@ -8,6 +8,7 @@ import { sign as cryptoSign } from './crypto.js'
 import { buildItem, tombstone, makeRef, isoNow } from './object.js'
 import { deriveKeypair, importPEM, createSigner, IDENTITY_UUID, ROOT_REF, IDENTITY_TYPE_DEF } from './identity.js'
 import { validateSchema } from './validation.js'
+import { isRevisionConflict } from './store/conflict.js'
 
 // ─── Deep merge utility ──────────────────────────────────────────
 
@@ -156,7 +157,10 @@ export function createClient(opts = {}) {
 
       let typeObj = typeCache.get(typeRef)
       if (typeObj === undefined) {
-        typeObj = await store.get(typeRef).catch(() => null)
+        typeObj = await store.get(typeRef).catch(error => {
+          if (isRevisionConflict(error)) throw error
+          return null
+        })
         typeCache.set(typeRef, typeObj ?? null)
       }
 
@@ -189,7 +193,10 @@ export function createClient(opts = {}) {
       if (fields.id) {
         const existingRef = makeRef(signer.pubkey, fields.id)
         let existing = null
-        try { existing = await store.get(existingRef) } catch { /* not found */ }
+        try { existing = await store.get(existingRef) } catch (error) {
+          if (isRevisionConflict(error)) throw error
+          // Otherwise preserve the existing unavailable/not-found behavior.
+        }
 
         if (existing?.item) {
           if (!opts.allowUpdate) {

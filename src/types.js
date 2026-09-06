@@ -83,6 +83,7 @@
  * @property {(signedObj: Envelope) => Promise<{ok: boolean, status?: number, error?: string}>} put
  * @property {(query: SearchQuery) => Promise<SearchResult>} search
  * @property {(ref: string, opts?: InboundQuery) => Promise<SearchResult>} inbound
+ * @property {(signedObj: Envelope) => Promise<string>} [preserveConflict] - archive a competing edit without replacing the current object
  */
 
 /**
